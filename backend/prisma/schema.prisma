@@ -1,0 +1,1763 @@
+// Hotel F&B Inventory Management System — Prisma schema (single source of DB truth)
+//
+// Design note: domain hierarchies (header→lines, category trees, vendor↔item,
+// procurement chain) use explicit Prisma @relation. Actor/audit foreign keys
+// (created_by, approved_by, posted_by, requested_by, updated_by, etc.) are stored
+// as plain UUID scalar columns rather than formal Prisma relations — otherwise the
+// User model would need ~60 back-relation fields, which is unmaintainable.
+// Referential integrity for those columns is enforced at the DB layer via SQL in
+// migrations. This is deliberate and documented in TECHNICAL_SPECIFICATION.md.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  ADMIN
+  STORE_MANAGER
+  FB_MANAGER
+  FINANCE
+  GM_DIRECTOR
+}
+
+enum ItemStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+}
+
+enum Uom {
+  KG
+  G
+  LTR
+  ML
+  PCS
+  DZ
+  BOX
+  CAN
+  BTL
+  PKT
+  BG
+  ROLL
+}
+
+enum VendorStatus {
+  ACTIVE
+  INACTIVE
+  BLACKLISTED
+  UNDER_REVIEW
+}
+
+enum PrStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  PARTIALLY_APPROVED
+  REJECTED
+  CONVERTED_TO_RFQ
+  CLOSED
+}
+
+enum RfqStatus {
+  DRAFT
+  SENT
+  PARTIAL_RESPONSE
+  FULLY_RESPONDED
+  COMPARATIVE_DONE
+  CLOSED
+}
+
+enum QuotationStatus {
+  RECEIVED
+  UNDER_REVIEW
+  ACCEPTED
+  REJECTED
+}
+
+enum PoStatus {
+  DRAFT
+  APPROVED
+  SENT_TO_VENDOR
+  PARTIALLY_RECEIVED
+  FULLY_RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+enum GrnStatus {
+  DRAFT
+  POSTED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ESCALATED
+}
+
+enum ApprovalDocumentType {
+  PURCHASE_REQUISITION
+  PURCHASE_ORDER
+  GRN
+  WASTAGE
+  PAYMENT
+  RATE_CONTRACT
+}
+
+enum PriceAlertType {
+  SPIKE
+  DROP
+  THRESHOLD_BREACH
+}
+
+enum PaymentTerms {
+  IMMEDIATE
+  NET_7
+  NET_15
+  NET_30
+  NET_45
+  NET_60
+  COD
+}
+
+enum StorageZone {
+  DRY_STORE
+  COLD_ROOM
+  FREEZER
+  BAR_STORE
+  KITCHEN
+  HOUSEKEEPING
+  GENERAL
+}
+
+enum IssuanceStatus {
+  DRAFT
+  REQUESTED
+  APPROVED
+  PARTIALLY_ISSUED
+  ISSUED
+  CANCELLED
+}
+
+enum TransferStatus {
+  DRAFT
+  IN_TRANSIT
+  RECEIVED
+  PARTIALLY_RECEIVED
+  CANCELLED
+}
+
+enum StockCountStatus {
+  DRAFT
+  IN_PROGRESS
+  COUNTED
+  VARIANCE_REVIEW
+  APPROVED
+  POSTED
+  CANCELLED
+}
+
+enum StockCountType {
+  FULL
+  CYCLE
+  SPOT
+  CATEGORY
+}
+
+enum WastageStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  POSTED
+}
+
+enum WastageReason {
+  EXPIRED
+  SPOILED
+  DAMAGED
+  BREAKAGE
+  OVER_PRODUCTION
+  CONTAMINATION
+  PEST
+  OTHER
+}
+
+enum InvoiceStatus {
+  RECEIVED
+  UNDER_VERIFICATION
+  MATCHED
+  MISMATCH_HOLD
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  DISPUTED
+  CANCELLED
+}
+
+enum MatchStatus {
+  NOT_MATCHED
+  MATCHED
+  PRICE_VARIANCE
+  QTY_VARIANCE
+  BOTH_VARIANCE
+}
+
+enum PaymentStatus {
+  SCHEDULED
+  PENDING_APPROVAL
+  APPROVED
+  PROCESSED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  CHEQUE
+  CASH
+  UPI
+  CARD
+  ADJUSTMENT
+}
+
+enum DebitNoteStatus {
+  DRAFT
+  ISSUED
+  ACKNOWLEDGED
+  SETTLED
+  CANCELLED
+}
+
+enum DebitNoteReason {
+  POST_RECEIPT_DEFECT
+  SHORT_SUPPLY
+  PRICE_OVERCHARGE
+  QUALITY_REJECTION
+  EXPIRY
+  OTHER
+}
+
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  TERMINATED
+  RENEWED
+}
+
+enum StandingOrderFrequency {
+  DAILY
+  ALTERNATE_DAYS
+  WEEKLY
+  BIWEEKLY
+  MONTHLY
+  CUSTOM_DAYS
+}
+
+enum StandingOrderStatus {
+  ACTIVE
+  PAUSED
+  ENDED
+}
+
+enum ExpiryAlertLevel {
+  NEAR_EXPIRY
+  EXPIRED
+  CRITICAL
+}
+
+enum NotificationType {
+  APPROVAL_PENDING
+  APPROVAL_RESULT
+  PRICE_ALERT
+  EXPIRY_ALERT
+  REORDER_ALERT
+  GRN_POSTED
+  PAYMENT_DUE
+  CONTRACT_EXPIRING
+  STOCK_COUNT_DUE
+  SYSTEM
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  BOTH
+}
+
+enum PoRevisionStatus {
+  ORIGINAL
+  AMENDED
+  SUPERSEDED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  STATUS_CHANGE
+  APPROVE
+  REJECT
+  POST
+  LOGIN
+  LOGOUT
+  EXPORT
+  IMPORT
+}
+
+enum BatchStatus {
+  ACTIVE
+  EXHAUSTED
+  EXPIRED
+  QUARANTINED
+}
+
+enum PoSourceType {
+  MANUAL
+  FROM_CS
+  FROM_STANDING_ORDER
+  FROM_CONTRACT
+}
+
+// ============================================================
+// CORE / IDENTITY
+// ============================================================
+
+model Outlet {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(100)
+  code      String   @unique @db.VarChar(20)
+  type      String   @db.VarChar(50)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  users                 User[]
+  storageLocations      StorageLocation[]
+  purchaseRequisitions  PurchaseRequisition[]
+  purchaseOrders        PurchaseOrder[]
+
+  @@map("outlets")
+}
+
+model User {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  employeeCode String    @unique @map("employee_code") @db.VarChar(20)
+  fullName     String    @map("full_name") @db.VarChar(100)
+  email        String    @unique @db.VarChar(150)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  role         UserRole
+  outletId     String?   @map("outlet_id") @db.Uuid
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  outlet Outlet? @relation(fields: [outletId], references: [id])
+
+  @@index([role])
+  @@map("users")
+}
+
+model RevokedToken {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jti       String   @unique @db.VarChar(64)
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at") @db.Timestamptz
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("revoked_tokens")
+}
+
+// ============================================================
+// MASTER INVENTORY
+// ============================================================
+
+model ItemCategory {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String   @db.VarChar(100)
+  code        String   @unique @db.VarChar(20)
+  parentId    String?  @map("parent_id") @db.Uuid
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  parent   ItemCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children ItemCategory[] @relation("CategoryTree")
+  items    Item[]
+
+  @@index([parentId])
+  @@map("item_categories")
+}
+
+model StorageLocation {
+  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                String      @db.VarChar(100)
+  code                String      @unique @db.VarChar(20)
+  zone                StorageZone
+  outletId            String?     @map("outlet_id") @db.Uuid
+  temperatureMinC     Decimal?    @map("temperature_min_c") @db.Decimal(5, 2)
+  temperatureMaxC     Decimal?    @map("temperature_max_c") @db.Decimal(5, 2)
+  capacityDescription String?     @map("capacity_description")
+  isActive            Boolean     @default(true) @map("is_active")
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  outlet Outlet? @relation(fields: [outletId], references: [id])
+  items  Item[]
+
+  @@map("storage_locations")
+}
+
+model Item {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemCode          String     @unique @map("item_code") @db.VarChar(30)
+  name              String     @db.VarChar(200)
+  description       String?
+  categoryId        String     @map("category_id") @db.Uuid
+  primaryUom        Uom        @map("primary_uom")
+  secondaryUom      Uom?       @map("secondary_uom")
+  conversionFactor  Decimal?   @map("conversion_factor") @db.Decimal(10, 4)
+  storageLocationId String     @map("storage_location_id") @db.Uuid
+  parLevelMin       Decimal    @default(0) @map("par_level_min") @db.Decimal(12, 3)
+  parLevelMax       Decimal    @default(0) @map("par_level_max") @db.Decimal(12, 3)
+  reorderPoint      Decimal    @default(0) @map("reorder_point") @db.Decimal(12, 3)
+  reorderQty        Decimal    @default(0) @map("reorder_qty") @db.Decimal(12, 3)
+  currentStock      Decimal    @default(0) @map("current_stock") @db.Decimal(12, 3)
+  averageCost       Decimal    @default(0) @map("average_cost") @db.Decimal(12, 4)
+  lastPurchasePrice Decimal?   @map("last_purchase_price") @db.Decimal(12, 4)
+  isPerishable      Boolean    @default(false) @map("is_perishable")
+  shelfLifeDays     Int?       @map("shelf_life_days")
+  hsnCode           String?    @map("hsn_code") @db.VarChar(20)
+  taxRatePercent    Decimal    @default(0) @map("tax_rate_percent") @db.Decimal(5, 2)
+  status            ItemStatus @default(ACTIVE)
+  imageUrl          String?    @map("image_url") @db.VarChar(500)
+  trackBatches      Boolean    @default(false) @map("track_batches")
+  trackExpiry       Boolean    @default(false) @map("track_expiry")
+  nearExpiryDays    Int?       @map("near_expiry_days")
+  barcode           String?    @db.VarChar(64)
+  abcClass          String?    @map("abc_class") @db.Char(1)
+  createdBy         String     @map("created_by") @db.Uuid
+  createdAt         DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  category        ItemCategory    @relation(fields: [categoryId], references: [id])
+  storageLocation StorageLocation @relation(fields: [storageLocationId], references: [id])
+
+  stockLedger        ItemStockLedger[]
+  vendorMappings     VendorItemMapping[]
+  prItems            PurchaseRequisitionItem[]
+  rfqItems           RfqItem[]
+  quotationLines     QuotationLineItem[]
+  csLineSelections   CsLineSelection[]
+  poItems            PurchaseOrderItem[]
+  grnItems           GrnItem[]
+  priceHistory       PriceHistory[]
+  priceAlerts        PriceAlert[]
+  batches            ItemBatch[]
+  issuanceItems      StockIssuanceItem[]
+  transferItems      StockTransferItem[]
+  countItems         StockCountItem[]
+  wastageItems       WastageItem[]
+  rateContractItems  RateContractItem[]
+  standingOrderItems StandingOrderItem[]
+  recipeIngredients  RecipeIngredient[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@index([storageLocationId])
+  @@index([barcode])
+  @@map("items")
+}
+
+model ItemStockLedger {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId        String   @map("item_id") @db.Uuid
+  batchId       String?  @map("batch_id") @db.Uuid
+  movementType  String   @map("movement_type") @db.VarChar(30)
+  referenceId   String?  @map("reference_id") @db.Uuid
+  referenceCode String?  @map("reference_code") @db.VarChar(50)
+  qtyIn         Decimal  @default(0) @map("qty_in") @db.Decimal(12, 3)
+  qtyOut        Decimal  @default(0) @map("qty_out") @db.Decimal(12, 3)
+  unitCost      Decimal  @map("unit_cost") @db.Decimal(12, 4)
+  balanceQty    Decimal  @map("balance_qty") @db.Decimal(12, 3)
+  balanceValue  Decimal  @map("balance_value") @db.Decimal(14, 4)
+  remarks       String?
+  createdBy     String   @map("created_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  item  Item       @relation(fields: [itemId], references: [id])
+  batch ItemBatch? @relation(fields: [batchId], references: [id])
+
+  @@index([itemId, createdAt])
+  @@map("item_stock_ledger")
+}
+
+// ============================================================
+// VENDOR MANAGEMENT
+// ============================================================
+
+model VendorCategory {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name        String   @db.VarChar(100)
+  code        String   @unique @db.VarChar(20)
+  description String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  vendors Vendor[]
+
+  @@map("vendor_categories")
+}
+
+model Vendor {
+  id                 String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendorCode         String       @unique @map("vendor_code") @db.VarChar(30)
+  companyName        String       @map("company_name") @db.VarChar(200)
+  tradeName          String?      @map("trade_name") @db.VarChar(200)
+  vendorCategoryId   String       @map("vendor_category_id") @db.Uuid
+  contactPerson      String       @map("contact_person") @db.VarChar(100)
+  email              String       @db.VarChar(150)
+  phone              String       @db.VarChar(20)
+  alternatePhone     String?      @map("alternate_phone") @db.VarChar(20)
+  addressLine1       String       @map("address_line1") @db.VarChar(200)
+  addressLine2       String?      @map("address_line2") @db.VarChar(200)
+  city               String       @db.VarChar(100)
+  state              String       @db.VarChar(100)
+  pincode            String       @db.VarChar(10)
+  country            String       @default("India") @db.VarChar(100)
+  taxId              String?      @map("tax_id") @db.VarChar(50)
+  paymentTerms       PaymentTerms @default(NET_30) @map("payment_terms")
+  creditLimit        Decimal?     @map("credit_limit") @db.Decimal(14, 2)
+  bankName           String?      @map("bank_name") @db.VarChar(100)
+  bankAccountNo      String?      @map("bank_account_no") @db.VarChar(50)
+  bankIfsc           String?      @map("bank_ifsc") @db.VarChar(20)
+  bankBranch         String?      @map("bank_branch") @db.VarChar(100)
+  status             VendorStatus @default(ACTIVE)
+  blacklistReason    String?      @map("blacklist_reason")
+  rating             Decimal?     @db.Decimal(3, 2)
+  onTimeDeliveryRate Decimal?     @map("on_time_delivery_rate") @db.Decimal(5, 2)
+  qualityScore       Decimal?     @map("quality_score") @db.Decimal(5, 2)
+  notes              String?
+  createdBy          String       @map("created_by") @db.Uuid
+  createdAt          DateTime     @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime     @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendorCategory     VendorCategory              @relation(fields: [vendorCategoryId], references: [id])
+  itemMappings       VendorItemMapping[]
+  rfqVendors         RfqVendor[]
+  quotations         Quotation[]
+  purchaseOrders     PurchaseOrder[]
+  grns               Grn[]
+  performanceRecords VendorPerformanceRecord[]
+  rankingScores      VendorRankingScore[]
+  priceHistory       PriceHistory[]
+  invoices           VendorInvoice[]
+  payments           Payment[]
+  debitNotes         DebitNote[]
+  rateContracts      RateContract[]
+  standingOrders     StandingOrder[]
+
+  @@map("vendors")
+}
+
+model VendorItemMapping {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendorId              String   @map("vendor_id") @db.Uuid
+  itemId                String   @map("item_id") @db.Uuid
+  vendorItemCode        String?  @map("vendor_item_code") @db.VarChar(50)
+  vendorItemDescription String?  @map("vendor_item_description") @db.VarChar(200)
+  leadTimeDays          Int      @default(1) @map("lead_time_days")
+  minimumOrderQty       Decimal? @map("minimum_order_qty") @db.Decimal(12, 3)
+  isPreferred           Boolean  @default(false) @map("is_preferred")
+  isActive              Boolean  @default(true) @map("is_active")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+  item   Item   @relation(fields: [itemId], references: [id])
+
+  @@unique([vendorId, itemId])
+  @@map("vendor_item_mapping")
+}
+
+model VendorPerformanceRecord {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendorId             String    @map("vendor_id") @db.Uuid
+  poId                 String?   @map("po_id") @db.Uuid
+  grnId                String?   @map("grn_id") @db.Uuid
+  promisedDeliveryDate DateTime  @map("promised_delivery_date") @db.Date
+  actualDeliveryDate   DateTime? @map("actual_delivery_date") @db.Date
+  onTime               Boolean?  @map("on_time")
+  delayDays            Int?      @map("delay_days")
+  orderedQty           Decimal   @map("ordered_qty") @db.Decimal(12, 3)
+  receivedQty          Decimal?  @map("received_qty") @db.Decimal(12, 3)
+  rejectedQty          Decimal   @default(0) @map("rejected_qty") @db.Decimal(12, 3)
+  qualityPassRate      Decimal?  @map("quality_pass_rate") @db.Decimal(5, 2)
+  priceVariancePercent Decimal?  @map("price_variance_percent") @db.Decimal(6, 3)
+  rfqResponseTimeHours Decimal?  @map("rfq_response_time_hours") @db.Decimal(8, 2)
+  notes                String?
+  recordedAt           DateTime  @default(now()) @map("recorded_at") @db.Timestamptz
+
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+
+  @@map("vendor_performance_records")
+}
+
+// ============================================================
+// APPROVAL WORKFLOW
+// ============================================================
+
+model ApprovalTier {
+  id           String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentType ApprovalDocumentType @map("document_type")
+  tierName     String               @map("tier_name") @db.VarChar(50)
+  tierOrder    Int                  @map("tier_order")
+  minValue     Decimal              @map("min_value") @db.Decimal(14, 2)
+  maxValue     Decimal?             @map("max_value") @db.Decimal(14, 2)
+  requiredRole UserRole             @map("required_role")
+  isActive     Boolean              @default(true) @map("is_active")
+  createdAt    DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime             @updatedAt @map("updated_at") @db.Timestamptz
+
+  approvalRecords ApprovalRecord[]
+
+  @@unique([documentType, tierOrder])
+  @@map("approval_tiers")
+}
+
+model ApprovalRecord {
+  id             String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentType   ApprovalDocumentType @map("document_type")
+  documentId     String               @map("document_id") @db.Uuid
+  documentNumber String               @map("document_number") @db.VarChar(30)
+  tierId         String               @map("tier_id") @db.Uuid
+  tierOrder      Int                  @map("tier_order")
+  approverId     String               @map("approver_id") @db.Uuid
+  status         ApprovalStatus       @default(PENDING)
+  actionAt       DateTime?            @map("action_at") @db.Timestamptz
+  comments       String?
+  escalatedTo    String?              @map("escalated_to") @db.Uuid
+  escalatedAt    DateTime?            @map("escalated_at") @db.Timestamptz
+  createdAt      DateTime             @default(now()) @map("created_at") @db.Timestamptz
+
+  tier ApprovalTier @relation(fields: [tierId], references: [id])
+
+  @@index([documentType, documentId])
+  @@index([approverId, status])
+  @@map("approval_records")
+}
+
+model ApprovalDelegation {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  delegatorId  String                 @map("delegator_id") @db.Uuid
+  delegateId   String                 @map("delegate_id") @db.Uuid
+  documentTypes ApprovalDocumentType[] @map("document_types")
+  startDate    DateTime               @map("start_date") @db.Date
+  endDate      DateTime               @map("end_date") @db.Date
+  reason       String?
+  isActive     Boolean                @default(true) @map("is_active")
+  createdAt    DateTime               @default(now()) @map("created_at") @db.Timestamptz
+
+  @@map("approval_delegations")
+}
+
+// ============================================================
+// PROCUREMENT FLOW
+// ============================================================
+
+model PurchaseRequisition {
+  id                   String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  prNumber             String   @unique @map("pr_number") @db.VarChar(30)
+  title                String   @db.VarChar(200)
+  requestedBy          String   @map("requested_by") @db.Uuid
+  outletId             String?  @map("outlet_id") @db.Uuid
+  requiredDate         DateTime @map("required_date") @db.Date
+  priority             String   @default("NORMAL") @db.VarChar(20)
+  totalEstimatedValue  Decimal  @default(0) @map("total_estimated_value") @db.Decimal(14, 2)
+  status               PrStatus @default(DRAFT)
+  remarks              String?
+  currentApprovalTier  Int?     @map("current_approval_tier")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  outlet Outlet?                   @relation(fields: [outletId], references: [id])
+  items  PurchaseRequisitionItem[]
+  rfqs   RequestForQuotation[]
+  pos    PurchaseOrder[]
+
+  @@map("purchase_requisitions")
+}
+
+model PurchaseRequisitionItem {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  prId                String   @map("pr_id") @db.Uuid
+  itemId              String   @map("item_id") @db.Uuid
+  requiredQty         Decimal  @map("required_qty") @db.Decimal(12, 3)
+  uom                 Uom
+  estimatedUnitPrice  Decimal? @map("estimated_unit_price") @db.Decimal(12, 4)
+  estimatedTotal      Decimal? @map("estimated_total") @db.Decimal(14, 2)
+  currentStock        Decimal? @map("current_stock") @db.Decimal(12, 3)
+  justification       String?
+  lineStatus          String   @default("PENDING") @map("line_status") @db.VarChar(20)
+
+  pr      PurchaseRequisition @relation(fields: [prId], references: [id], onDelete: Cascade)
+  item    Item                @relation(fields: [itemId], references: [id])
+  rfqItems RfqItem[]
+
+  @@map("purchase_requisition_items")
+}
+
+model RequestForQuotation {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rfqNumber          String    @unique @map("rfq_number") @db.VarChar(30)
+  prId               String?   @map("pr_id") @db.Uuid
+  title              String    @db.VarChar(200)
+  issuedBy           String    @map("issued_by") @db.Uuid
+  issueDate          DateTime  @default(now()) @map("issue_date") @db.Date
+  responseDeadline   DateTime  @map("response_deadline") @db.Date
+  deliveryRequiredBy DateTime  @map("delivery_required_by") @db.Date
+  status             RfqStatus @default(DRAFT)
+  termsAndConditions String?   @map("terms_and_conditions")
+  notes              String?
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  pr                   PurchaseRequisition?  @relation(fields: [prId], references: [id])
+  items                RfqItem[]
+  rfqVendors           RfqVendor[]
+  quotations           Quotation[]
+  comparativeStatement ComparativeStatement?
+  purchaseOrders       PurchaseOrder[]
+
+  @@map("request_for_quotations")
+}
+
+model RfqItem {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rfqId          String   @map("rfq_id") @db.Uuid
+  itemId         String   @map("item_id") @db.Uuid
+  requiredQty    Decimal  @map("required_qty") @db.Decimal(12, 3)
+  uom            Uom
+  prItemId       String?  @map("pr_item_id") @db.Uuid
+  specifications String?
+
+  rfq              RequestForQuotation      @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  item             Item                     @relation(fields: [itemId], references: [id])
+  prItem           PurchaseRequisitionItem? @relation(fields: [prItemId], references: [id])
+  quotationLines   QuotationLineItem[]
+  csLineSelections CsLineSelection[]
+
+  @@map("rfq_items")
+}
+
+model RfqVendor {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  rfqId          String    @map("rfq_id") @db.Uuid
+  vendorId       String    @map("vendor_id") @db.Uuid
+  invitedAt      DateTime  @default(now()) @map("invited_at") @db.Timestamptz
+  emailSentAt    DateTime? @map("email_sent_at") @db.Timestamptz
+  respondedAt    DateTime? @map("responded_at") @db.Timestamptz
+  responseStatus String    @default("INVITED") @map("response_status") @db.VarChar(20)
+
+  rfq    RequestForQuotation @relation(fields: [rfqId], references: [id], onDelete: Cascade)
+  vendor Vendor              @relation(fields: [vendorId], references: [id])
+
+  @@unique([rfqId, vendorId])
+  @@map("rfq_vendors")
+}
+
+model Quotation {
+  id                    String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotationNumber       String          @unique @map("quotation_number") @db.VarChar(30)
+  rfqId                 String          @map("rfq_id") @db.Uuid
+  vendorId              String          @map("vendor_id") @db.Uuid
+  submittedAt           DateTime        @default(now()) @map("submitted_at") @db.Timestamptz
+  validUntil            DateTime        @map("valid_until") @db.Date
+  paymentTerms          PaymentTerms    @map("payment_terms")
+  deliveryLeadTimeDays  Int             @map("delivery_lead_time_days")
+  status                QuotationStatus @default(RECEIVED)
+  totalValue            Decimal         @default(0) @map("total_value") @db.Decimal(14, 2)
+  documentUrl           String?         @map("document_url") @db.VarChar(500)
+  notes                 String?
+
+  rfq       RequestForQuotation @relation(fields: [rfqId], references: [id])
+  vendor    Vendor              @relation(fields: [vendorId], references: [id])
+  lineItems QuotationLineItem[]
+
+  @@unique([rfqId, vendorId])
+  @@map("quotations")
+}
+
+model QuotationLineItem {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  quotationId      String   @map("quotation_id") @db.Uuid
+  rfqItemId        String   @map("rfq_item_id") @db.Uuid
+  itemId           String   @map("item_id") @db.Uuid
+  quotedQty        Decimal  @map("quoted_qty") @db.Decimal(12, 3)
+  uom              Uom
+  unitPrice        Decimal  @map("unit_price") @db.Decimal(12, 4)
+  discountPercent  Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  taxPercent       Decimal  @default(0) @map("tax_percent") @db.Decimal(5, 2)
+  netUnitPrice     Decimal  @map("net_unit_price") @db.Decimal(12, 4)
+  freightPerUnit   Decimal  @default(0) @map("freight_per_unit") @db.Decimal(12, 4)
+  landedUnitPrice  Decimal  @default(0) @map("landed_unit_price") @db.Decimal(12, 4)
+  totalPrice       Decimal  @map("total_price") @db.Decimal(14, 2)
+  brand            String?  @db.VarChar(100)
+  countryOfOrigin  String?  @map("country_of_origin") @db.VarChar(100)
+  notes            String?
+
+  quotation        Quotation         @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  rfqItem          RfqItem           @relation(fields: [rfqItemId], references: [id])
+  item             Item              @relation(fields: [itemId], references: [id])
+  csLineSelections CsLineSelection[]
+
+  @@map("quotation_line_items")
+}
+
+model ComparativeStatement {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  csNumber            String   @unique @map("cs_number") @db.VarChar(30)
+  rfqId               String   @unique @map("rfq_id") @db.Uuid
+  preparedBy          String   @map("prepared_by") @db.Uuid
+  preparedAt          DateTime @default(now()) @map("prepared_at") @db.Timestamptz
+  recommendationNotes String?  @map("recommendation_notes")
+  status              String   @default("DRAFT") @db.VarChar(20)
+  approvedBy          String?  @map("approved_by") @db.Uuid
+  approvedAt          DateTime? @map("approved_at") @db.Timestamptz
+
+  rfq            RequestForQuotation @relation(fields: [rfqId], references: [id])
+  lineSelections CsLineSelection[]
+
+  @@map("comparative_statements")
+}
+
+model CsLineSelection {
+  id                       String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  csId                     String   @map("cs_id") @db.Uuid
+  rfqItemId                String   @map("rfq_item_id") @db.Uuid
+  itemId                   String   @map("item_id") @db.Uuid
+  selectedVendorId         String   @map("selected_vendor_id") @db.Uuid
+  selectedQuotationLineId  String   @map("selected_quotation_line_id") @db.Uuid
+  selectedUnitPrice        Decimal  @map("selected_unit_price") @db.Decimal(12, 4)
+  selectedQty              Decimal  @map("selected_qty") @db.Decimal(12, 3)
+  selectionReason          String?  @map("selection_reason")
+  lowestPriceVendorId      String?  @map("lowest_price_vendor_id") @db.Uuid
+  lowestPrice              Decimal? @map("lowest_price") @db.Decimal(12, 4)
+  priceVarianceFromLowest  Decimal? @map("price_variance_from_lowest") @db.Decimal(6, 3)
+
+  cs            ComparativeStatement @relation(fields: [csId], references: [id], onDelete: Cascade)
+  rfqItem       RfqItem              @relation(fields: [rfqItemId], references: [id])
+  item          Item                 @relation(fields: [itemId], references: [id])
+  quotationLine QuotationLineItem    @relation(fields: [selectedQuotationLineId], references: [id])
+  poItems       PurchaseOrderItem[]
+
+  @@unique([csId, rfqItemId])
+  @@map("cs_line_selections")
+}
+
+model PurchaseOrder {
+  id                  String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  poNumber            String           @unique @map("po_number") @db.VarChar(30)
+  vendorId            String           @map("vendor_id") @db.Uuid
+  csId                String?          @map("cs_id") @db.Uuid
+  rfqId               String?          @map("rfq_id") @db.Uuid
+  prId                String?          @map("pr_id") @db.Uuid
+  rateContractId      String?          @map("rate_contract_id") @db.Uuid
+  parentPoId          String?          @map("parent_po_id") @db.Uuid
+  sourceType          PoSourceType     @default(MANUAL) @map("source_type")
+  revisionNo          Int              @default(0) @map("revision_no")
+  revisionStatus      PoRevisionStatus @default(ORIGINAL) @map("revision_status")
+  createdBy           String           @map("created_by") @db.Uuid
+  outletId            String?          @map("outlet_id") @db.Uuid
+  poDate              DateTime         @default(now()) @map("po_date") @db.Date
+  deliveryDate        DateTime         @map("delivery_date") @db.Date
+  deliveryAddress     String           @map("delivery_address")
+  paymentTerms        PaymentTerms     @map("payment_terms")
+  subtotal            Decimal          @default(0) @db.Decimal(14, 2)
+  taxAmount           Decimal          @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  discountAmount      Decimal          @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  totalAmount         Decimal          @default(0) @map("total_amount") @db.Decimal(14, 2)
+  landedCostTotal     Decimal          @default(0) @map("landed_cost_total") @db.Decimal(14, 2)
+  status              PoStatus         @default(DRAFT)
+  termsAndConditions  String?          @map("terms_and_conditions")
+  internalNotes       String?          @map("internal_notes")
+  currentApprovalTier Int?             @map("current_approval_tier")
+  sentToVendorAt      DateTime?        @map("sent_to_vendor_at") @db.Timestamptz
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor       Vendor               @relation(fields: [vendorId], references: [id])
+  rfq          RequestForQuotation? @relation(fields: [rfqId], references: [id])
+  pr           PurchaseRequisition? @relation(fields: [prId], references: [id])
+  outlet       Outlet?              @relation(fields: [outletId], references: [id])
+  rateContract RateContract?        @relation(fields: [rateContractId], references: [id])
+  parentPo     PurchaseOrder?       @relation("PoRevision", fields: [parentPoId], references: [id])
+  revisions    PurchaseOrder[]      @relation("PoRevision")
+  items        PurchaseOrderItem[]
+  grns         Grn[]
+  invoices     VendorInvoice[]
+
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  poId            String   @map("po_id") @db.Uuid
+  itemId          String   @map("item_id") @db.Uuid
+  csLineId        String?  @map("cs_line_id") @db.Uuid
+  orderedQty      Decimal  @map("ordered_qty") @db.Decimal(12, 3)
+  receivedQty     Decimal  @default(0) @map("received_qty") @db.Decimal(12, 3)
+  uom             Uom
+  unitPrice       Decimal  @map("unit_price") @db.Decimal(12, 4)
+  discountPercent Decimal  @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  taxPercent      Decimal  @default(0) @map("tax_percent") @db.Decimal(5, 2)
+  totalPrice      Decimal  @map("total_price") @db.Decimal(14, 2)
+  lineStatus      String   @default("OPEN") @map("line_status") @db.VarChar(20)
+
+  po       PurchaseOrder       @relation(fields: [poId], references: [id], onDelete: Cascade)
+  item     Item                @relation(fields: [itemId], references: [id])
+  csLine   CsLineSelection?    @relation(fields: [csLineId], references: [id])
+  grnItems GrnItem[]
+  invoiceItems VendorInvoiceItem[]
+
+  @@map("purchase_order_items")
+}
+
+model Grn {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  grnNumber            String    @unique @map("grn_number") @db.VarChar(30)
+  poId                 String    @map("po_id") @db.Uuid
+  vendorId             String    @map("vendor_id") @db.Uuid
+  receivedBy           String    @map("received_by") @db.Uuid
+  storageLocationId    String    @map("storage_location_id") @db.Uuid
+  grnDate              DateTime  @default(now()) @map("grn_date") @db.Date
+  vendorInvoiceNumber  String?   @map("vendor_invoice_number") @db.VarChar(100)
+  vendorInvoiceDate    DateTime? @map("vendor_invoice_date") @db.Date
+  vendorInvoiceAmount  Decimal?  @map("vendor_invoice_amount") @db.Decimal(14, 2)
+  vehicleNumber        String?   @map("vehicle_number") @db.VarChar(30)
+  status               GrnStatus @default(DRAFT)
+  totalReceivedValue   Decimal   @default(0) @map("total_received_value") @db.Decimal(14, 2)
+  totalRejectedValue   Decimal   @default(0) @map("total_rejected_value") @db.Decimal(14, 2)
+  temperatureAtReceipt Decimal?  @map("temperature_at_receipt") @db.Decimal(5, 2)
+  documentUrl          String?   @map("document_url") @db.VarChar(500)
+  remarks              String?
+  postedAt             DateTime? @map("posted_at") @db.Timestamptz
+  postedBy             String?   @map("posted_by") @db.Uuid
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  po              PurchaseOrder   @relation(fields: [poId], references: [id])
+  vendor          Vendor          @relation(fields: [vendorId], references: [id])
+  items           GrnItem[]
+  priceHistory    PriceHistory[]
+  invoiceLinks    InvoiceGrnLink[]
+  debitNotes      DebitNote[]
+
+  @@map("grns")
+}
+
+model GrnItem {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  grnId                String    @map("grn_id") @db.Uuid
+  poItemId             String    @map("po_item_id") @db.Uuid
+  itemId               String    @map("item_id") @db.Uuid
+  orderedQty           Decimal   @map("ordered_qty") @db.Decimal(12, 3)
+  receivedQty          Decimal   @map("received_qty") @db.Decimal(12, 3)
+  acceptedQty          Decimal   @map("accepted_qty") @db.Decimal(12, 3)
+  rejectedQty          Decimal   @default(0) @map("rejected_qty") @db.Decimal(12, 3)
+  rejectionReason      String?   @map("rejection_reason")
+  uom                  Uom
+  unitPrice            Decimal   @map("unit_price") @db.Decimal(12, 4)
+  totalAcceptedValue   Decimal   @map("total_accepted_value") @db.Decimal(14, 2)
+  batchNumber          String?   @map("batch_number") @db.VarChar(100)
+  expiryDate           DateTime? @map("expiry_date") @db.Date
+  temperatureAtReceipt Decimal?  @map("temperature_at_receipt") @db.Decimal(5, 2)
+
+  grn      Grn               @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  poItem   PurchaseOrderItem @relation(fields: [poItemId], references: [id])
+  item     Item              @relation(fields: [itemId], references: [id])
+  batches  ItemBatch[]
+  invoiceItems VendorInvoiceItem[]
+
+  @@map("grn_items")
+}
+
+// ============================================================
+// PRICE HISTORY & RANKING
+// ============================================================
+
+model PriceHistory {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId           String   @map("item_id") @db.Uuid
+  vendorId         String   @map("vendor_id") @db.Uuid
+  grnId            String?  @map("grn_id") @db.Uuid
+  poId             String?  @map("po_id") @db.Uuid
+  quotationLineId  String?  @map("quotation_line_id") @db.Uuid
+  unitPrice        Decimal  @map("unit_price") @db.Decimal(12, 4)
+  uom              Uom
+  quantity         Decimal  @db.Decimal(12, 3)
+  effectiveDate    DateTime @map("effective_date") @db.Date
+  recordedAt       DateTime @default(now()) @map("recorded_at") @db.Timestamptz
+
+  item   Item   @relation(fields: [itemId], references: [id])
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+  grn    Grn?   @relation(fields: [grnId], references: [id])
+
+  @@index([itemId, vendorId, effectiveDate])
+  @@map("price_history")
+}
+
+model PriceAlert {
+  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId           String         @map("item_id") @db.Uuid
+  vendorId         String?        @map("vendor_id") @db.Uuid
+  alertType        PriceAlertType @map("alert_type")
+  previousPrice    Decimal        @map("previous_price") @db.Decimal(12, 4)
+  currentPrice     Decimal        @map("current_price") @db.Decimal(12, 4)
+  changePercent    Decimal        @map("change_percent") @db.Decimal(6, 3)
+  thresholdPercent Decimal        @map("threshold_percent") @db.Decimal(5, 2)
+  isRead           Boolean        @default(false) @map("is_read")
+  isResolved       Boolean        @default(false) @map("is_resolved")
+  triggeredAt      DateTime       @default(now()) @map("triggered_at") @db.Timestamptz
+  resolvedBy       String?        @map("resolved_by") @db.Uuid
+  resolvedAt       DateTime?      @map("resolved_at") @db.Timestamptz
+
+  item Item @relation(fields: [itemId], references: [id])
+
+  @@map("price_alerts")
+}
+
+model PriceAlertConfig {
+  id                    String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId                String?  @unique @map("item_id") @db.Uuid
+  spikeThresholdPercent Decimal  @default(10.00) @map("spike_threshold_percent") @db.Decimal(5, 2)
+  dropThresholdPercent  Decimal  @default(10.00) @map("drop_threshold_percent") @db.Decimal(5, 2)
+  lookbackDays          Int      @default(30) @map("lookback_days")
+  isActive              Boolean  @default(true) @map("is_active")
+  updatedBy             String   @map("updated_by") @db.Uuid
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("price_alert_config")
+}
+
+model VendorRankingConfig {
+  id                     String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  configName             String   @map("config_name") @db.VarChar(100)
+  priceWeight            Decimal  @default(30.00) @map("price_weight") @db.Decimal(5, 2)
+  deliveryWeight         Decimal  @default(25.00) @map("delivery_weight") @db.Decimal(5, 2)
+  qualityWeight          Decimal  @default(25.00) @map("quality_weight") @db.Decimal(5, 2)
+  responseTimeWeight     Decimal  @default(10.00) @map("response_time_weight") @db.Decimal(5, 2)
+  paymentTermsWeight     Decimal  @default(10.00) @map("payment_terms_weight") @db.Decimal(5, 2)
+  evaluationPeriodMonths Int      @default(6) @map("evaluation_period_months")
+  isActive               Boolean  @default(true) @map("is_active")
+  updatedBy              String   @map("updated_by") @db.Uuid
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  scores VendorRankingScore[]
+
+  @@map("vendor_ranking_config")
+}
+
+model VendorRankingScore {
+  id                  String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  vendorId            String   @map("vendor_id") @db.Uuid
+  configId            String   @map("config_id") @db.Uuid
+  periodFrom          DateTime @map("period_from") @db.Date
+  periodTo            DateTime @map("period_to") @db.Date
+  priceScore          Decimal  @map("price_score") @db.Decimal(5, 2)
+  deliveryScore       Decimal  @map("delivery_score") @db.Decimal(5, 2)
+  qualityScore        Decimal  @map("quality_score") @db.Decimal(5, 2)
+  responseTimeScore   Decimal  @map("response_time_score") @db.Decimal(5, 2)
+  paymentTermsScore   Decimal  @map("payment_terms_score") @db.Decimal(5, 2)
+  weightedTotalScore  Decimal  @map("weighted_total_score") @db.Decimal(5, 2)
+  rankInCategory      Int?     @map("rank_in_category")
+  vendorCategoryId    String?  @map("vendor_category_id") @db.Uuid
+  poCount             Int      @default(0) @map("po_count")
+  grnCount            Int      @default(0) @map("grn_count")
+  computedAt          DateTime @default(now()) @map("computed_at") @db.Timestamptz
+
+  vendor Vendor              @relation(fields: [vendorId], references: [id])
+  config VendorRankingConfig @relation(fields: [configId], references: [id])
+
+  @@map("vendor_ranking_scores")
+}
+
+// ============================================================
+// STOCK OPERATIONS
+// ============================================================
+
+model StockIssuance {
+  id                   String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  issuanceNumber       String         @unique @map("issuance_number") @db.VarChar(30)
+  fromStorageLocationId String        @map("from_storage_location_id") @db.Uuid
+  toOutletId           String         @map("to_outlet_id") @db.Uuid
+  requestedBy          String         @map("requested_by") @db.Uuid
+  approvedBy           String?        @map("approved_by") @db.Uuid
+  issuanceDate         DateTime       @default(now()) @map("issuance_date") @db.Date
+  purpose              String?
+  costCenter           String         @map("cost_center") @db.VarChar(50)
+  status               IssuanceStatus @default(DRAFT)
+  totalValue           Decimal        @default(0) @map("total_value") @db.Decimal(14, 2)
+  remarks              String?
+  postedAt             DateTime?      @map("posted_at") @db.Timestamptz
+  postedBy             String?        @map("posted_by") @db.Uuid
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  items StockIssuanceItem[]
+
+  @@map("stock_issuances")
+}
+
+model StockIssuanceItem {
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  issuanceId   String  @map("issuance_id") @db.Uuid
+  itemId       String  @map("item_id") @db.Uuid
+  batchId      String? @map("batch_id") @db.Uuid
+  requestedQty Decimal @map("requested_qty") @db.Decimal(12, 3)
+  issuedQty    Decimal @default(0) @map("issued_qty") @db.Decimal(12, 3)
+  uom          Uom
+  unitCost     Decimal @map("unit_cost") @db.Decimal(12, 4)
+  totalCost    Decimal @default(0) @map("total_cost") @db.Decimal(14, 2)
+  lineStatus   String  @default("PENDING") @map("line_status") @db.VarChar(20)
+
+  issuance StockIssuance @relation(fields: [issuanceId], references: [id], onDelete: Cascade)
+  item     Item          @relation(fields: [itemId], references: [id])
+  batch    ItemBatch?    @relation(fields: [batchId], references: [id])
+
+  @@map("stock_issuance_items")
+}
+
+model StockTransfer {
+  id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  transferNumber         String         @unique @map("transfer_number") @db.VarChar(30)
+  fromStorageLocationId  String         @map("from_storage_location_id") @db.Uuid
+  toStorageLocationId    String         @map("to_storage_location_id") @db.Uuid
+  initiatedBy            String         @map("initiated_by") @db.Uuid
+  receivedBy             String?        @map("received_by") @db.Uuid
+  dispatchDate           DateTime       @default(now()) @map("dispatch_date") @db.Date
+  receiptDate            DateTime?      @map("receipt_date") @db.Date
+  status                 TransferStatus @default(DRAFT)
+  totalValue             Decimal        @default(0) @map("total_value") @db.Decimal(14, 2)
+  remarks                String?
+  createdAt              DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  items StockTransferItem[]
+
+  @@map("stock_transfers")
+}
+
+model StockTransferItem {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  transferId     String  @map("transfer_id") @db.Uuid
+  itemId         String  @map("item_id") @db.Uuid
+  batchId        String? @map("batch_id") @db.Uuid
+  sentQty        Decimal @map("sent_qty") @db.Decimal(12, 3)
+  receivedQty    Decimal @default(0) @map("received_qty") @db.Decimal(12, 3)
+  uom            Uom
+  unitCost       Decimal @map("unit_cost") @db.Decimal(12, 4)
+  varianceQty    Decimal @default(0) @map("variance_qty") @db.Decimal(12, 3)
+  varianceReason String? @map("variance_reason")
+  lineStatus     String  @default("PENDING") @map("line_status") @db.VarChar(20)
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  item     Item          @relation(fields: [itemId], references: [id])
+  batch    ItemBatch?    @relation(fields: [batchId], references: [id])
+
+  @@map("stock_transfer_items")
+}
+
+model StockCount {
+  id                  String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  countNumber         String           @unique @map("count_number") @db.VarChar(30)
+  countType           StockCountType   @map("count_type")
+  storageLocationId   String?          @map("storage_location_id") @db.Uuid
+  categoryId          String?          @map("category_id") @db.Uuid
+  scheduledDate       DateTime         @map("scheduled_date") @db.Date
+  startedAt           DateTime?        @map("started_at") @db.Timestamptz
+  completedAt         DateTime?        @map("completed_at") @db.Timestamptz
+  countedBy           String           @map("counted_by") @db.Uuid
+  reviewedBy          String?          @map("reviewed_by") @db.Uuid
+  approvedBy          String?          @map("approved_by") @db.Uuid
+  isBlind             Boolean          @default(false) @map("is_blind")
+  status              StockCountStatus @default(DRAFT)
+  totalVarianceValue  Decimal          @default(0) @map("total_variance_value") @db.Decimal(14, 2)
+  remarks             String?
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  items StockCountItem[]
+
+  @@map("stock_counts")
+}
+
+model StockCountItem {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  countId         String   @map("count_id") @db.Uuid
+  itemId          String   @map("item_id") @db.Uuid
+  batchId         String?  @map("batch_id") @db.Uuid
+  systemQty       Decimal  @map("system_qty") @db.Decimal(12, 3)
+  countedQty      Decimal? @map("counted_qty") @db.Decimal(12, 3)
+  varianceQty     Decimal  @default(0) @map("variance_qty") @db.Decimal(12, 3)
+  uom             Uom
+  unitCost        Decimal  @map("unit_cost") @db.Decimal(12, 4)
+  varianceValue   Decimal  @default(0) @map("variance_value") @db.Decimal(14, 2)
+  variancePercent Decimal  @default(0) @map("variance_percent") @db.Decimal(6, 3)
+  varianceReason  String?  @map("variance_reason")
+  recountFlag     Boolean  @default(false) @map("recount_flag")
+  countedAt       DateTime? @map("counted_at") @db.Timestamptz
+
+  count StockCount @relation(fields: [countId], references: [id], onDelete: Cascade)
+  item  Item       @relation(fields: [itemId], references: [id])
+  batch ItemBatch? @relation(fields: [batchId], references: [id])
+
+  @@map("stock_count_items")
+}
+
+model WastageRecord {
+  id                 String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  wastageNumber      String        @unique @map("wastage_number") @db.VarChar(30)
+  storageLocationId  String        @map("storage_location_id") @db.Uuid
+  outletId           String?       @map("outlet_id") @db.Uuid
+  reportedBy         String        @map("reported_by") @db.Uuid
+  approvedBy         String?       @map("approved_by") @db.Uuid
+  wastageDate        DateTime      @default(now()) @map("wastage_date") @db.Date
+  reason             WastageReason
+  status             WastageStatus @default(DRAFT)
+  totalWastageValue  Decimal       @default(0) @map("total_wastage_value") @db.Decimal(14, 2)
+  attachmentUrl      String?       @map("attachment_url") @db.VarChar(500)
+  remarks            String?
+  postedAt           DateTime?     @map("posted_at") @db.Timestamptz
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  items WastageItem[]
+
+  @@map("wastage_records")
+}
+
+model WastageItem {
+  id         String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  wastageId  String  @map("wastage_id") @db.Uuid
+  itemId     String  @map("item_id") @db.Uuid
+  batchId    String? @map("batch_id") @db.Uuid
+  qty        Decimal @db.Decimal(12, 3)
+  uom        Uom
+  unitCost   Decimal @map("unit_cost") @db.Decimal(12, 4)
+  totalValue Decimal @map("total_value") @db.Decimal(14, 2)
+  itemReason String? @map("item_reason")
+  photoUrl   String? @map("photo_url") @db.VarChar(500)
+
+  wastage WastageRecord @relation(fields: [wastageId], references: [id], onDelete: Cascade)
+  item    Item          @relation(fields: [itemId], references: [id])
+  batch   ItemBatch?    @relation(fields: [batchId], references: [id])
+
+  @@map("wastage_items")
+}
+
+// ============================================================
+// BATCH & EXPIRY
+// ============================================================
+
+model ItemBatch {
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId            String      @map("item_id") @db.Uuid
+  grnItemId         String?     @map("grn_item_id") @db.Uuid
+  batchNumber       String      @map("batch_number") @db.VarChar(100)
+  storageLocationId String      @map("storage_location_id") @db.Uuid
+  receivedQty       Decimal     @map("received_qty") @db.Decimal(12, 3)
+  availableQty      Decimal     @map("available_qty") @db.Decimal(12, 3)
+  unitCost          Decimal     @map("unit_cost") @db.Decimal(12, 4)
+  manufactureDate   DateTime?   @map("manufacture_date") @db.Date
+  expiryDate        DateTime?   @map("expiry_date") @db.Date
+  supplierLot       String?     @map("supplier_lot") @db.VarChar(100)
+  status            BatchStatus @default(ACTIVE)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime    @updatedAt @map("updated_at") @db.Timestamptz
+
+  item          Item                @relation(fields: [itemId], references: [id])
+  grnItem       GrnItem?            @relation(fields: [grnItemId], references: [id])
+  stockLedger   ItemStockLedger[]
+  issuanceItems StockIssuanceItem[]
+  transferItems StockTransferItem[]
+  countItems    StockCountItem[]
+  wastageItems  WastageItem[]
+  expiryAlerts  ExpiryAlert[]
+
+  @@index([itemId, expiryDate])
+  @@map("item_batches")
+}
+
+model ExpiryAlert {
+  id                String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  itemId            String           @map("item_id") @db.Uuid
+  batchId           String           @map("batch_id") @db.Uuid
+  storageLocationId String           @map("storage_location_id") @db.Uuid
+  expiryDate        DateTime         @map("expiry_date") @db.Date
+  daysToExpiry      Int              @map("days_to_expiry")
+  alertLevel        ExpiryAlertLevel @map("alert_level")
+  availableQty      Decimal          @map("available_qty") @db.Decimal(12, 3)
+  valueAtRisk       Decimal          @map("value_at_risk") @db.Decimal(14, 2)
+  isRead            Boolean          @default(false) @map("is_read")
+  isActioned        Boolean          @default(false) @map("is_actioned")
+  actionTaken       String?          @map("action_taken")
+  triggeredAt       DateTime         @default(now()) @map("triggered_at") @db.Timestamptz
+  actionedBy        String?          @map("actioned_by") @db.Uuid
+
+  batch ItemBatch @relation(fields: [batchId], references: [id])
+
+  @@map("expiry_alerts")
+}
+
+// ============================================================
+// FINANCE & PAYMENTS
+// ============================================================
+
+model VendorInvoice {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceNumber String        @map("invoice_number") @db.VarChar(100)
+  internalRef   String        @unique @map("internal_ref") @db.VarChar(30)
+  vendorId      String        @map("vendor_id") @db.Uuid
+  poId          String?       @map("po_id") @db.Uuid
+  invoiceDate   DateTime      @map("invoice_date") @db.Date
+  dueDate       DateTime      @map("due_date") @db.Date
+  receivedDate  DateTime      @default(now()) @map("received_date") @db.Date
+  currency      String        @default("INR") @db.VarChar(3)
+  subtotal      Decimal       @default(0) @db.Decimal(14, 2)
+  taxAmount     Decimal       @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  freightAmount Decimal       @default(0) @map("freight_amount") @db.Decimal(14, 2)
+  otherCharges  Decimal       @default(0) @map("other_charges") @db.Decimal(14, 2)
+  discountAmount Decimal      @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  totalAmount   Decimal       @default(0) @map("total_amount") @db.Decimal(14, 2)
+  status        InvoiceStatus @default(RECEIVED)
+  matchStatus   MatchStatus   @default(NOT_MATCHED) @map("match_status")
+  documentUrl   String?       @map("document_url") @db.VarChar(500)
+  verifiedBy    String?       @map("verified_by") @db.Uuid
+  approvedBy    String?       @map("approved_by") @db.Uuid
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor      Vendor              @relation(fields: [vendorId], references: [id])
+  po          PurchaseOrder?      @relation(fields: [poId], references: [id])
+  items       VendorInvoiceItem[]
+  grnLinks    InvoiceGrnLink[]
+  allocations PaymentAllocation[]
+  debitNotes  DebitNote[]
+
+  @@map("vendor_invoices")
+}
+
+model VendorInvoiceItem {
+  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceId       String      @map("invoice_id") @db.Uuid
+  poItemId        String?     @map("po_item_id") @db.Uuid
+  grnItemId       String?     @map("grn_item_id") @db.Uuid
+  itemId          String      @map("item_id") @db.Uuid
+  invoicedQty     Decimal     @map("invoiced_qty") @db.Decimal(12, 3)
+  uom             Uom
+  unitPrice       Decimal     @map("unit_price") @db.Decimal(12, 4)
+  taxPercent      Decimal     @default(0) @map("tax_percent") @db.Decimal(5, 2)
+  lineTotal       Decimal     @map("line_total") @db.Decimal(14, 2)
+  matchedGrnQty   Decimal     @default(0) @map("matched_grn_qty") @db.Decimal(12, 3)
+  qtyVariance     Decimal     @default(0) @map("qty_variance") @db.Decimal(12, 3)
+  priceVariance   Decimal     @default(0) @map("price_variance") @db.Decimal(12, 4)
+  lineMatchStatus MatchStatus @default(NOT_MATCHED) @map("line_match_status")
+
+  invoice VendorInvoice      @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  poItem  PurchaseOrderItem? @relation(fields: [poItemId], references: [id])
+  grnItem GrnItem?           @relation(fields: [grnItemId], references: [id])
+
+  @@map("vendor_invoice_items")
+}
+
+model InvoiceGrnLink {
+  id          String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceId   String  @map("invoice_id") @db.Uuid
+  grnId       String  @map("grn_id") @db.Uuid
+  linkedValue Decimal @map("linked_value") @db.Decimal(14, 2)
+
+  invoice VendorInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  grn     Grn           @relation(fields: [grnId], references: [id])
+
+  @@unique([invoiceId, grnId])
+  @@map("invoice_grn_links")
+}
+
+model Payment {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentNumber String        @unique @map("payment_number") @db.VarChar(30)
+  vendorId      String        @map("vendor_id") @db.Uuid
+  paymentDate   DateTime?     @map("payment_date") @db.Date
+  scheduledDate DateTime      @map("scheduled_date") @db.Date
+  method        PaymentMethod
+  amount        Decimal       @db.Decimal(14, 2)
+  currency      String        @default("INR") @db.VarChar(3)
+  bankReference String?       @map("bank_reference") @db.VarChar(100)
+  status        PaymentStatus @default(SCHEDULED)
+  approvedBy    String?       @map("approved_by") @db.Uuid
+  processedBy   String?       @map("processed_by") @db.Uuid
+  remarks       String?
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor      Vendor              @relation(fields: [vendorId], references: [id])
+  allocations PaymentAllocation[]
+
+  @@map("payments")
+}
+
+model PaymentAllocation {
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentId       String  @map("payment_id") @db.Uuid
+  invoiceId       String  @map("invoice_id") @db.Uuid
+  allocatedAmount Decimal @map("allocated_amount") @db.Decimal(14, 2)
+  debitNoteId     String? @map("debit_note_id") @db.Uuid
+
+  payment   Payment       @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice   VendorInvoice @relation(fields: [invoiceId], references: [id])
+  debitNote DebitNote?    @relation(fields: [debitNoteId], references: [id])
+
+  @@unique([paymentId, invoiceId])
+  @@map("payment_allocations")
+}
+
+model DebitNote {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  debitNoteNumber String          @unique @map("debit_note_number") @db.VarChar(30)
+  vendorId        String          @map("vendor_id") @db.Uuid
+  grnId           String?         @map("grn_id") @db.Uuid
+  invoiceId       String?         @map("invoice_id") @db.Uuid
+  reason          DebitNoteReason
+  debitDate       DateTime        @default(now()) @map("debit_date") @db.Date
+  status          DebitNoteStatus @default(DRAFT)
+  totalAmount     Decimal         @default(0) @map("total_amount") @db.Decimal(14, 2)
+  reasonDetail    String?         @map("reason_detail")
+  documentUrl     String?         @map("document_url") @db.VarChar(500)
+  issuedBy        String          @map("issued_by") @db.Uuid
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor      Vendor              @relation(fields: [vendorId], references: [id])
+  grn         Grn?                @relation(fields: [grnId], references: [id])
+  invoice     VendorInvoice?      @relation(fields: [invoiceId], references: [id])
+  items       DebitNoteItem[]
+  allocations PaymentAllocation[]
+
+  @@map("debit_notes")
+}
+
+model DebitNoteItem {
+  id           String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  debitNoteId  String  @map("debit_note_id") @db.Uuid
+  itemId       String  @map("item_id") @db.Uuid
+  batchId      String? @map("batch_id") @db.Uuid
+  qty          Decimal @db.Decimal(12, 3)
+  uom          Uom
+  unitPrice    Decimal @map("unit_price") @db.Decimal(12, 4)
+  totalValue   Decimal @map("total_value") @db.Decimal(14, 2)
+  reasonDetail String? @map("reason_detail")
+
+  debitNote DebitNote @relation(fields: [debitNoteId], references: [id], onDelete: Cascade)
+
+  @@map("debit_note_items")
+}
+
+// ============================================================
+// CONTRACTS & STANDING ORDERS
+// ============================================================
+
+model RateContract {
+  id                String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractNumber    String         @unique @map("contract_number") @db.VarChar(30)
+  vendorId          String         @map("vendor_id") @db.Uuid
+  title             String         @db.VarChar(200)
+  startDate         DateTime       @map("start_date") @db.Date
+  endDate           DateTime       @map("end_date") @db.Date
+  status            ContractStatus @default(DRAFT)
+  paymentTerms      PaymentTerms   @map("payment_terms")
+  autoRenew         Boolean        @default(false) @map("auto_renew")
+  renewalNoticeDays Int            @default(30) @map("renewal_notice_days")
+  termsUrl          String?        @map("terms_url") @db.VarChar(500)
+  createdBy         String         @map("created_by") @db.Uuid
+  approvedBy        String?        @map("approved_by") @db.Uuid
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor         Vendor             @relation(fields: [vendorId], references: [id])
+  items          RateContractItem[]
+  standingOrders StandingOrder[]
+  purchaseOrders PurchaseOrder[]
+
+  @@map("rate_contracts")
+}
+
+model RateContractItem {
+  id                  String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contractId          String  @map("contract_id") @db.Uuid
+  itemId              String  @map("item_id") @db.Uuid
+  contractedUnitPrice Decimal @map("contracted_unit_price") @db.Decimal(12, 4)
+  uom                 Uom
+  minOrderQty         Decimal? @map("min_order_qty") @db.Decimal(12, 3)
+  maxPeriodQty        Decimal? @map("max_period_qty") @db.Decimal(12, 3)
+  priceRevisionClause String?  @map("price_revision_clause")
+  isActive            Boolean  @default(true) @map("is_active")
+
+  contract RateContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  item     Item         @relation(fields: [itemId], references: [id])
+
+  @@unique([contractId, itemId])
+  @@map("rate_contract_items")
+}
+
+model StandingOrder {
+  id                String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  soNumber          String                 @unique @map("so_number") @db.VarChar(30)
+  vendorId          String                 @map("vendor_id") @db.Uuid
+  contractId        String?                @map("contract_id") @db.Uuid
+  outletId          String                 @map("outlet_id") @db.Uuid
+  frequency         StandingOrderFrequency
+  customDays        Int[]                  @map("custom_days")
+  startDate         DateTime               @map("start_date") @db.Date
+  endDate           DateTime?              @map("end_date") @db.Date
+  nextRunDate       DateTime               @map("next_run_date") @db.Date
+  deliveryLeadDays  Int                    @default(1) @map("delivery_lead_days")
+  status            StandingOrderStatus    @default(ACTIVE)
+  autoApprove       Boolean                @default(false) @map("auto_approve")
+  createdBy         String                 @map("created_by") @db.Uuid
+  createdAt         DateTime               @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime               @updatedAt @map("updated_at") @db.Timestamptz
+
+  vendor   Vendor              @relation(fields: [vendorId], references: [id])
+  contract RateContract?       @relation(fields: [contractId], references: [id])
+  items    StandingOrderItem[]
+  runs     StandingOrderRun[]
+
+  @@map("standing_orders")
+}
+
+model StandingOrderItem {
+  id              String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  standingOrderId String  @map("standing_order_id") @db.Uuid
+  itemId          String  @map("item_id") @db.Uuid
+  defaultQty      Decimal @map("default_qty") @db.Decimal(12, 3)
+  uom             Uom
+  unitPrice       Decimal @map("unit_price") @db.Decimal(12, 4)
+  isActive        Boolean @default(true) @map("is_active")
+
+  standingOrder StandingOrder @relation(fields: [standingOrderId], references: [id], onDelete: Cascade)
+  item          Item          @relation(fields: [itemId], references: [id])
+
+  @@map("standing_order_items")
+}
+
+model StandingOrderRun {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  standingOrderId String   @map("standing_order_id") @db.Uuid
+  runDate         DateTime @map("run_date") @db.Date
+  generatedPoId   String?  @map("generated_po_id") @db.Uuid
+  status          String   @db.VarChar(20)
+  skipReason      String?  @map("skip_reason")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  standingOrder StandingOrder @relation(fields: [standingOrderId], references: [id], onDelete: Cascade)
+
+  @@map("standing_order_runs")
+}
+
+// ============================================================
+// RECIPE / BOM
+// ============================================================
+
+model Recipe {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipeCode   String   @unique @map("recipe_code") @db.VarChar(30)
+  name         String   @db.VarChar(200)
+  outletId     String?  @map("outlet_id") @db.Uuid
+  category     String?  @db.VarChar(100)
+  yieldQty     Decimal  @map("yield_qty") @db.Decimal(12, 3)
+  yieldUom     Uom      @map("yield_uom")
+  prepNotes    String?  @map("prep_notes")
+  sellingPrice Decimal? @map("selling_price") @db.Decimal(12, 2)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdBy    String   @map("created_by") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  ingredients     RecipeIngredient[] @relation("RecipeToIngredient")
+  usedAsSubRecipe RecipeIngredient[] @relation("SubRecipe")
+  costings        RecipeCosting[]
+
+  @@map("recipes")
+}
+
+model RecipeIngredient {
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipeId       String  @map("recipe_id") @db.Uuid
+  itemId         String? @map("item_id") @db.Uuid
+  subRecipeId    String? @map("sub_recipe_id") @db.Uuid
+  qty            Decimal @db.Decimal(12, 4)
+  uom            Uom
+  wastagePercent Decimal @default(0) @map("wastage_percent") @db.Decimal(5, 2)
+  isActive       Boolean @default(true) @map("is_active")
+
+  recipe    Recipe  @relation("RecipeToIngredient", fields: [recipeId], references: [id], onDelete: Cascade)
+  item      Item?   @relation(fields: [itemId], references: [id])
+  subRecipe Recipe? @relation("SubRecipe", fields: [subRecipeId], references: [id])
+
+  @@map("recipe_ingredients")
+}
+
+model RecipeCosting {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipeId        String   @map("recipe_id") @db.Uuid
+  computedAt      DateTime @default(now()) @map("computed_at") @db.Timestamptz
+  totalCost       Decimal  @map("total_cost") @db.Decimal(14, 4)
+  costPerYieldUnit Decimal @map("cost_per_yield_unit") @db.Decimal(14, 4)
+  foodCostPercent Decimal? @map("food_cost_percent") @db.Decimal(6, 3)
+  computedBy      String   @map("computed_by") @db.Uuid
+
+  recipe Recipe @relation(fields: [recipeId], references: [id])
+
+  @@map("recipe_costings")
+}
+
+// ============================================================
+// CONFIGURATION / AUDIT / NOTIFICATIONS
+// ============================================================
+
+model UomMaster {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String   @unique @db.VarChar(20)
+  name             String   @db.VarChar(100)
+  dimension        String   @db.VarChar(20)
+  baseUomCode      String?  @map("base_uom_code") @db.VarChar(20)
+  conversionToBase Decimal? @map("conversion_to_base") @db.Decimal(14, 6)
+  isActive         Boolean  @default(true) @map("is_active")
+
+  @@map("uom_master")
+}
+
+model TaxMaster {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code          String    @unique @db.VarChar(20)
+  name          String    @db.VarChar(100)
+  ratePercent   Decimal   @map("rate_percent") @db.Decimal(5, 2)
+  isCompound    Boolean   @default(false) @map("is_compound")
+  isActive      Boolean   @default(true) @map("is_active")
+  effectiveFrom DateTime  @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+
+  @@map("tax_master")
+}
+
+model NumberSeries {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentType   String    @unique @map("document_type") @db.VarChar(50)
+  prefix         String    @db.VarChar(20)
+  padding        Int       @default(4)
+  currentValue   Int       @default(0) @map("current_value")
+  resetFrequency String    @default("YEARLY") @map("reset_frequency") @db.VarChar(20)
+  lastResetAt    DateTime? @map("last_reset_at") @db.Timestamptz
+
+  @@map("number_series")
+}
+
+model FinancialYear {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(20)
+  startDate DateTime @map("start_date") @db.Date
+  endDate   DateTime @map("end_date") @db.Date
+  isCurrent Boolean  @default(false) @map("is_current")
+  isClosed  Boolean  @default(false) @map("is_closed")
+
+  @@map("financial_years")
+}
+
+model HotelProfile {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  legalName       String   @map("legal_name") @db.VarChar(200)
+  brandName       String   @map("brand_name") @db.VarChar(200)
+  address         String?
+  taxRegistration String?  @map("tax_registration") @db.VarChar(50)
+  baseCurrency    String   @default("INR") @map("base_currency") @db.VarChar(3)
+  logoUrl         String?  @map("logo_url") @db.VarChar(500)
+  fiscalSettings  Json?    @map("fiscal_settings")
+  updatedBy       String   @map("updated_by") @db.Uuid
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("hotel_profile")
+}
+
+model SystemSetting {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  settingKey   String   @unique @map("setting_key") @db.VarChar(100)
+  settingValue Json     @map("setting_value")
+  description  String?
+  category     String?  @db.VarChar(50)
+  updatedBy    String   @map("updated_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("system_settings")
+}
+
+model AuditLog {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId     String?     @map("actor_id") @db.Uuid
+  action      AuditAction
+  entityType  String      @map("entity_type") @db.VarChar(60)
+  entityId    String?     @map("entity_id") @db.Uuid
+  entityLabel String?     @map("entity_label") @db.VarChar(200)
+  beforeJson  Json?       @map("before_json")
+  afterJson   Json?       @map("after_json")
+  ipAddress   String?     @map("ip_address") @db.VarChar(50)
+  userAgent   String?     @map("user_agent")
+  requestId   String?     @map("request_id") @db.VarChar(64)
+  createdAt   DateTime    @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String              @map("user_id") @db.Uuid
+  type        NotificationType
+  title       String              @db.VarChar(200)
+  body        String?
+  linkUrl     String?             @map("link_url") @db.VarChar(500)
+  entityType  String?             @map("entity_type") @db.VarChar(60)
+  entityId    String?             @map("entity_id") @db.Uuid
+  channel     NotificationChannel @default(IN_APP)
+  isRead      Boolean             @default(false) @map("is_read")
+  readAt      DateTime?           @map("read_at") @db.Timestamptz
+  emailSentAt DateTime?           @map("email_sent_at") @db.Timestamptz
+  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([userId, isRead, createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String              @map("user_id") @db.Uuid
+  type      NotificationType
+  channel   NotificationChannel @default(BOTH)
+  isEnabled Boolean             @default(true) @map("is_enabled")
+
+  @@unique([userId, type])
+  @@map("notification_preferences")
+}
