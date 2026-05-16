@@ -1,10 +1,17 @@
 # Restaurant Inventory Management System — Hotel F&B Operation
-## Technical Specification Document v1.0
+## Technical Specification Document v1.1
+
+> **v1.1 (post-review):** Part I (Sections 1–13) is the original procurement-focused
+> spec. **Part II (Section 14 onward)** is the comprehensiveness extension added after
+> functional review — it closes the inventory-OUT, finance, contracts, expiry,
+> recipe, reporting, configuration, audit, and ease-of-use gaps. Part II additions
+> supersede Part I where they overlap (notably the consolidated phase plan in §22).
 
 ---
 
 ## Table of Contents
 
+### Part I — Procurement Core (v1.0)
 1. System Overview
 2. Technology Stack & Architecture
 3. Folder / File Structure
@@ -17,7 +24,19 @@
 10. Module 5 — Price History & Tracking
 11. Module 6 — Vendor Ranking Engine
 12. Authentication & Authorization
-13. Development Phases with Story Points
+13. Development Phases with Story Points *(superseded by §22)*
+
+### Part II — Comprehensiveness Extension (v1.1)
+14. Extension Overview & New Enums
+15. New Database Tables
+16. Module 7 — Stock Operations (Issuance, Transfer, Physical Count, Wastage)
+17. Module 8 — Finance & Payments (Invoice Match, Payments, Debit Notes/Returns)
+18. Module 9 — Contracts & Standing Orders
+19. Module 10 — Batch, Expiry & FEFO Management
+20. Module 11 — Recipe / BOM & Costing
+21. Module 12 — Reports & Analytics; Module 13 — System Configuration; Module 14 — Audit & Notifications
+22. Cross-Cutting Enhancements & Consolidated Permission Matrix
+23. Consolidated Development Phase Plan (authoritative)
 
 ---
 
@@ -641,3 +660,526 @@ RANKING_CRON=0 2 1 * *
 - `/backend/src/modules/approvals/approvals.service.ts` — approval engine; all procurement docs depend on it.
 - `/backend/src/modules/comparative-statements/cs.service.ts` — comparison matrix + split-vendor PO generation.
 - `/frontend/src/pages/procurement/ComparativeStatementPage.tsx` — most complex UI; vendor-vs-item matrix.
+
+---
+---
+
+# PART II — Comprehensiveness Extension (v1.1)
+
+## 14. Extension Overview & New Enums
+
+### 14.1 Why This Extension Exists
+
+Part I delivers a strong **procurement** engine but, reviewed as a working hotel
+F&B system, it only models stock coming **IN**. A comprehensive system must also
+model stock going **OUT**, the **finance close** (invoice → payment), real-world
+**rate contracts / standing orders**, **expiry/FEFO** for perishables, **recipe
+costing**, a full **reports** suite, **system configuration**, a global **audit
+log**, and a set of **ease-of-use** capabilities (bulk import, role dashboards,
+barcode, delegation, mobile receiving). Part II specifies all of these.
+
+### 14.2 Closure Map (review gap → where addressed)
+
+| # | Gap | Addressed in |
+|---|---|---|
+| 1 | Stock issuance / consumption / inter-store transfer | Module 7 (§16) |
+| 2 | Physical stock count / reconciliation | Module 7 (§16.3) |
+| 3 | Wastage / spoilage | Module 7 (§16.4) |
+| 4 | Invoice verification, 3-way match, payments | Module 8 (§17) |
+| 5 | Rate contracts / standing orders | Module 9 (§18) |
+| 6 | Returns to vendor / debit notes | Module 8 (§17.3) |
+| 7 | Batch / expiry / FEFO | Module 10 (§19) |
+| 8 | Reports suite | Module 12 (§21.1) |
+| 9 | Recipe / BOM costing | Module 11 (§20) |
+| 10 | Approval delegation / out-of-office | §22.1 |
+| 11 | Settings / master configuration | Module 13 (§21.2) |
+| 12 | Bulk import/export | §22.2 |
+| 13 | Role-specific dashboards | §22.3 |
+| 14 | PO amendment / revision | §22.4 |
+| 15 | General audit log | Module 14 (§21.3) |
+| EoU | Barcode/QR, mobile receiving, global search, notifications, landed cost | §22.5–22.9 |
+
+### 14.3 New Enumerations
+
+```sql
+CREATE TYPE issuance_status AS ENUM ('DRAFT', 'REQUESTED', 'APPROVED', 'PARTIALLY_ISSUED', 'ISSUED', 'CANCELLED');
+CREATE TYPE transfer_status AS ENUM ('DRAFT', 'IN_TRANSIT', 'RECEIVED', 'PARTIALLY_RECEIVED', 'CANCELLED');
+CREATE TYPE stock_count_status AS ENUM ('DRAFT', 'IN_PROGRESS', 'COUNTED', 'VARIANCE_REVIEW', 'APPROVED', 'POSTED', 'CANCELLED');
+CREATE TYPE stock_count_type AS ENUM ('FULL', 'CYCLE', 'SPOT', 'CATEGORY');
+CREATE TYPE wastage_status AS ENUM ('DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'POSTED');
+CREATE TYPE wastage_reason AS ENUM ('EXPIRED', 'SPOILED', 'DAMAGED', 'BREAKAGE', 'OVER_PRODUCTION', 'CONTAMINATION', 'PEST', 'OTHER');
+CREATE TYPE invoice_status AS ENUM ('RECEIVED', 'UNDER_VERIFICATION', 'MATCHED', 'MISMATCH_HOLD', 'APPROVED', 'PARTIALLY_PAID', 'PAID', 'DISPUTED', 'CANCELLED');
+CREATE TYPE match_status AS ENUM ('NOT_MATCHED', 'MATCHED', 'PRICE_VARIANCE', 'QTY_VARIANCE', 'BOTH_VARIANCE');
+CREATE TYPE payment_status AS ENUM ('SCHEDULED', 'PENDING_APPROVAL', 'APPROVED', 'PROCESSED', 'FAILED', 'CANCELLED');
+CREATE TYPE payment_method AS ENUM ('BANK_TRANSFER', 'CHEQUE', 'CASH', 'UPI', 'CARD', 'ADJUSTMENT');
+CREATE TYPE debit_note_status AS ENUM ('DRAFT', 'ISSUED', 'ACKNOWLEDGED', 'SETTLED', 'CANCELLED');
+CREATE TYPE debit_note_reason AS ENUM ('POST_RECEIPT_DEFECT', 'SHORT_SUPPLY', 'PRICE_OVERCHARGE', 'QUALITY_REJECTION', 'EXPIRY', 'OTHER');
+CREATE TYPE contract_status AS ENUM ('DRAFT', 'ACTIVE', 'EXPIRED', 'TERMINATED', 'RENEWED');
+CREATE TYPE standing_order_frequency AS ENUM ('DAILY', 'ALTERNATE_DAYS', 'WEEKLY', 'BIWEEKLY', 'MONTHLY', 'CUSTOM_DAYS');
+CREATE TYPE standing_order_status AS ENUM ('ACTIVE', 'PAUSED', 'ENDED');
+CREATE TYPE expiry_alert_level AS ENUM ('NEAR_EXPIRY', 'EXPIRED', 'CRITICAL');
+CREATE TYPE notification_type AS ENUM ('APPROVAL_PENDING', 'APPROVAL_RESULT', 'PRICE_ALERT', 'EXPIRY_ALERT', 'REORDER_ALERT', 'GRN_POSTED', 'PAYMENT_DUE', 'CONTRACT_EXPIRING', 'STOCK_COUNT_DUE', 'SYSTEM');
+CREATE TYPE notification_channel AS ENUM ('IN_APP', 'EMAIL', 'BOTH');
+CREATE TYPE po_revision_status AS ENUM ('ORIGINAL', 'AMENDED', 'SUPERSEDED');
+CREATE TYPE audit_action AS ENUM ('CREATE', 'UPDATE', 'DELETE', 'STATUS_CHANGE', 'APPROVE', 'REJECT', 'POST', 'LOGIN', 'LOGOUT', 'EXPORT', 'IMPORT');
+```
+
+### 14.4 New Folder Modules (backend `src/modules/`, frontend `pages/`)
+
+```
+backend/src/modules/
+  stock-issuance/  stock-transfer/  stock-count/  wastage/
+  invoices/  payments/  debit-notes/
+  rate-contracts/  standing-orders/
+  batch-expiry/  recipes/
+  reports/  settings/  audit-log/  notifications/
+  dashboard/  bulk-io/  delegations/
+
+backend/src/jobs/
+  expiryAlertJob.ts  standingOrderJob.ts  reorderAlertJob.ts
+  paymentDueJob.ts   contractExpiryJob.ts
+
+frontend/src/pages/
+  stock-ops/   (Issuance, Transfer, StockCount, Wastage)
+  finance/     (InvoiceList, InvoiceMatch, PaymentList, DebitNote)
+  contracts/   (RateContractList/Form, StandingOrderList/Form)
+  expiry/      (ExpiryDashboard, BatchTrace)
+  recipes/     (RecipeList/Form, RecipeCosting)
+  reports/     (ReportCenter + per-report pages)
+  settings/    (UomMaster, TaxMaster, NumberSeries, HotelProfile, FinancialYear)
+  audit/       (AuditLogViewer)
+  dashboard/   (role-specific dashboard variants)
+```
+
+---
+
+## 15. New Database Tables
+
+> All tables follow Part I conventions: UUID PK `gen_random_uuid()`, `created_at`/
+> `updated_at` TIMESTAMPTZ, `@db.Decimal` for money/qty, soft-delete via status, and
+> append-only ledger writes for any stock-affecting action.
+
+### Stock Operations
+
+**stock_issuances** — issue from a store to a consuming outlet/department.
+id (PK), issuance_number (UNIQUE, `ISS-YYYYMM-NNNN`), from_storage_location_id (FK), to_outlet_id (FK), requested_by (FK users), approved_by (FK users, nullable), issuance_date, purpose, cost_center, status (issuance_status), total_value, remarks, posted_at, posted_by (FK), created_at, updated_at.
+
+**stock_issuance_items** — id (PK), issuance_id (FK CASCADE), item_id (FK), batch_id (FK item_batches, nullable — FEFO-selected), requested_qty, issued_qty, uom, unit_cost (weighted-avg snapshot), total_cost, line_status.
+
+**stock_transfers** — store-to-store movement. id (PK), transfer_number (UNIQUE, `TRF-YYYYMM-NNNN`), from_storage_location_id (FK), to_storage_location_id (FK), initiated_by (FK), received_by (FK, nullable), dispatch_date, receipt_date (nullable), status (transfer_status), total_value, remarks, created_at, updated_at.
+
+**stock_transfer_items** — id (PK), transfer_id (FK CASCADE), item_id (FK), batch_id (FK, nullable), sent_qty, received_qty, uom, unit_cost, variance_qty, variance_reason, line_status.
+
+**stock_counts** — physical count header. id (PK), count_number (UNIQUE, `STK-YYYYMM-NNNN`), count_type (stock_count_type), storage_location_id (FK, nullable for full), category_id (FK, nullable), scheduled_date, started_at, completed_at, counted_by (FK), reviewed_by (FK, nullable), approved_by (FK, nullable), is_blind (BOOLEAN — hide system qty during count), status (stock_count_status), total_variance_value, remarks, created_at, updated_at.
+
+**stock_count_items** — id (PK), count_id (FK CASCADE), item_id (FK), batch_id (FK, nullable), system_qty (snapshot), counted_qty, variance_qty (computed), uom, unit_cost, variance_value, variance_percent, variance_reason, recount_flag (BOOLEAN), counted_at.
+
+**wastage_records** — id (PK), wastage_number (UNIQUE, `WST-YYYYMM-NNNN`), storage_location_id (FK), outlet_id (FK, nullable), reported_by (FK), approved_by (FK, nullable), wastage_date, reason (wastage_reason), status (wastage_status), total_wastage_value, attachment_url, remarks, posted_at, created_at, updated_at.
+
+**wastage_items** — id (PK), wastage_id (FK CASCADE), item_id (FK), batch_id (FK, nullable), qty, uom, unit_cost, total_value, item_reason, photo_url.
+
+### Finance & Payments
+
+**vendor_invoices** — id (PK), invoice_number (vendor's), internal_ref (UNIQUE, `INV-YYYYMM-NNNN`), vendor_id (FK), po_id (FK, nullable), invoice_date, due_date (derived from payment_terms), received_date, currency (default base), subtotal, tax_amount, freight_amount, other_charges, discount_amount, total_amount, status (invoice_status), match_status (match_status), document_url, verified_by (FK, nullable), approved_by (FK, nullable), notes, created_at, updated_at.
+
+**vendor_invoice_items** — id (PK), invoice_id (FK CASCADE), po_item_id (FK, nullable), grn_item_id (FK, nullable), item_id (FK), invoiced_qty, uom, unit_price, tax_percent, line_total, matched_grn_qty, qty_variance, price_variance, line_match_status (match_status).
+
+**invoice_grn_links** — N:N invoice↔GRN (one invoice may cover multiple GRNs). id (PK), invoice_id (FK), grn_id (FK), linked_value. UNIQUE (invoice_id, grn_id).
+
+**payments** — id (PK), payment_number (UNIQUE, `PAY-YYYYMM-NNNN`), vendor_id (FK), payment_date, scheduled_date, method (payment_method), amount, currency, bank_reference, status (payment_status), approved_by (FK, nullable), processed_by (FK, nullable), remarks, created_at, updated_at.
+
+**payment_allocations** — apply one payment across many invoices. id (PK), payment_id (FK CASCADE), invoice_id (FK), allocated_amount, debit_note_id (FK, nullable — settled via debit note). UNIQUE (payment_id, invoice_id).
+
+**debit_notes** — vendor return / chargeback. id (PK), debit_note_number (UNIQUE, `DN-YYYYMM-NNNN`), vendor_id (FK), grn_id (FK, nullable), invoice_id (FK, nullable), reason (debit_note_reason), debit_date, status (debit_note_status), total_amount, reason_detail, document_url, issued_by (FK), created_at, updated_at.
+
+**debit_note_items** — id (PK), debit_note_id (FK CASCADE), item_id (FK), batch_id (FK, nullable), qty, uom, unit_price, total_value, reason_detail.
+
+### Contracts & Standing Orders
+
+**rate_contracts** — id (PK), contract_number (UNIQUE, `RC-YYYY-NNNN`), vendor_id (FK), title, start_date, end_date, status (contract_status), payment_terms, auto_renew (BOOLEAN), renewal_notice_days, terms_url, created_by (FK), approved_by (FK, nullable), created_at, updated_at.
+
+**rate_contract_items** — locked price for the period. id (PK), contract_id (FK CASCADE), item_id (FK), contracted_unit_price, uom, min_order_qty, max_period_qty (nullable cap), price_revision_clause, is_active. UNIQUE (contract_id, item_id).
+
+**standing_orders** — recurring auto-PO (milk/bread/produce). id (PK), so_number (UNIQUE, `SO-YYYY-NNNN`), vendor_id (FK), contract_id (FK rate_contracts, nullable), outlet_id (FK), frequency (standing_order_frequency), custom_days (INT[] — weekdays for CUSTOM_DAYS), start_date, end_date (nullable), next_run_date, delivery_lead_days, status (standing_order_status), auto_approve (BOOLEAN), created_by (FK), created_at, updated_at.
+
+**standing_order_items** — id (PK), standing_order_id (FK CASCADE), item_id (FK), default_qty, uom, unit_price (from contract or last), is_active.
+
+**standing_order_runs** — audit of each generated PO. id (PK), standing_order_id (FK), run_date, generated_po_id (FK purchase_orders, nullable), status, skip_reason (nullable), created_at.
+
+### Batch & Expiry
+
+**item_batches** — per-batch stock with expiry; the FEFO source of truth. id (PK), item_id (FK), grn_item_id (FK, nullable), batch_number, storage_location_id (FK), received_qty, available_qty, unit_cost, manufacture_date (nullable), expiry_date (nullable), supplier_lot, status ('ACTIVE','EXHAUSTED','EXPIRED','QUARANTINED'), created_at, updated_at. Index (item_id, expiry_date ASC) for FEFO.
+
+**expiry_alerts** — id (PK), item_id (FK), batch_id (FK), storage_location_id (FK), expiry_date, days_to_expiry, alert_level (expiry_alert_level), available_qty, value_at_risk, is_read, is_actioned, action_taken, triggered_at, actioned_by (FK, nullable).
+
+### Recipe / BOM
+
+**recipes** — id (PK), recipe_code (UNIQUE), name, outlet_id (FK, nullable), category, yield_qty, yield_uom, prep_notes, selling_price (nullable), is_active, created_by (FK), created_at, updated_at.
+
+**recipe_ingredients** — id (PK), recipe_id (FK CASCADE), item_id (FK, nullable), sub_recipe_id (FK recipes, nullable — nested recipes), qty, uom, wastage_percent, is_active. CHECK: exactly one of item_id / sub_recipe_id set.
+
+**recipe_costings** — periodic computed cost snapshot. id (PK), recipe_id (FK), computed_at, total_cost, cost_per_yield_unit, food_cost_percent (vs selling_price), computed_by (FK).
+
+### Configuration, Audit, Notifications
+
+**uom_master** — id (PK), code (UNIQUE), name, dimension ('WEIGHT','VOLUME','COUNT'), base_uom_code (nullable), conversion_to_base (DECIMAL), is_active. *(Replaces the hard-coded `uom` enum at config layer; enum retained for typed columns, validated against this table.)*
+
+**tax_master** — id (PK), code (UNIQUE), name, rate_percent, is_compound, is_active, effective_from, effective_to.
+
+**number_series** — id (PK), document_type (UNIQUE), prefix, padding, current_value, reset_frequency ('NEVER','YEARLY','MONTHLY'), last_reset_at.
+
+**financial_years** — id (PK), name, start_date, end_date, is_current (BOOLEAN), is_closed (BOOLEAN). One `is_current = true`.
+
+**hotel_profile** — id (PK, singleton), legal_name, brand_name, address, tax_registration, base_currency, logo_url, fiscal_settings (JSONB), updated_by (FK), updated_at.
+
+**system_settings** — key/value config. id (PK), setting_key (UNIQUE), setting_value (JSONB), description, category, updated_by (FK), updated_at.
+
+**approval_delegations** — id (PK), delegator_id (FK users), delegate_id (FK users), document_types (approval_document_type[]), start_date, end_date, reason, is_active, created_at. Rule: delegate must hold the same role as delegator.
+
+**audit_logs** (append-only, immutable) — id (PK), actor_id (FK users, nullable for system), action (audit_action), entity_type, entity_id, entity_label, before_json (JSONB, nullable), after_json (JSONB, nullable), ip_address, user_agent, request_id, created_at. Indexes on (entity_type, entity_id) and (actor_id, created_at).
+
+**notifications** — id (PK), user_id (FK), type (notification_type), title, body, link_url, entity_type, entity_id, channel (notification_channel), is_read, read_at, email_sent_at, created_at. Index (user_id, is_read, created_at DESC).
+
+**notification_preferences** — id (PK), user_id (FK), type (notification_type), channel (notification_channel), is_enabled. UNIQUE (user_id, type).
+
+### Schema changes to Part I tables
+
+- **purchase_orders**: add `source_type` ('MANUAL','FROM_CS','FROM_STANDING_ORDER','FROM_CONTRACT'), `rate_contract_id` (FK, nullable), `parent_po_id` (FK self, nullable), `revision_no` (INT default 0), `revision_status` (po_revision_status default 'ORIGINAL'), `landed_cost_total` (DECIMAL).
+- **quotation_line_items**: add `freight_per_unit`, `landed_unit_price` (computed: net_unit_price + freight + non-recoverable tax) — CS now compares landed cost.
+- **items**: add `track_batches` (BOOLEAN default false), `track_expiry` (BOOLEAN default false), `near_expiry_days` (INT, nullable), `barcode` (VARCHAR, nullable, indexed), `abc_class` (CHAR(1), nullable — A/B/C from analytics).
+- **grn_items**: on post, also create/update an **item_batches** row when `items.track_batches = true`.
+- **item_stock_ledger**: `movement_type` now also includes `'ISSUANCE'`, `'TRANSFER_OUT'`, `'TRANSFER_IN'`, `'COUNT_ADJUSTMENT'`, `'RETURN_TO_VENDOR'`; `batch_id` (FK item_batches, nullable) added.
+
+---
+
+## 16. Module 7 — Stock Operations
+
+### 16.1 Stock Issuance / Requisition (inventory OUT)
+
+**Context.** The store does not consume stock — outlets do. A kitchen/bar raises an
+internal requisition; the store issues against it; stock decrements at weighted-avg
+cost and posts to the consuming cost center. This is the primary OUT movement and
+the basis of true F&B cost.
+
+**User stories.**
+- As a **Kitchen/Outlet user**, I want to raise a stock requisition for items I need so the store can issue them.
+- As a **Store Manager**, I want to issue stock against a requisition, with FEFO batch auto-selection, so the oldest/nearest-expiry stock leaves first.
+- As an **F&B Manager**, I want issued value posted to the outlet cost center so daily F&B cost is accurate.
+- As a **Store Manager**, I want to partially issue when stock is short and keep the balance open.
+
+**Endpoints.** GET/POST/PUT `/api/v1/stock-issuances`; POST `/:id/submit`, `/:id/approve`, `/:id/issue` (posts ledger OUT, decrements batches FEFO), `/:id/cancel`; GET `/:id` (with FEFO batch suggestions).
+
+**Rules.** (1) Cannot issue more than available. (2) FEFO: auto-pick batches ordered by `expiry_date ASC, created_at ASC`. (3) Issue posts `item_stock_ledger` (`ISSUANCE`, qty_out) + decrements `item_batches.available_qty`; recompute `items.current_stock`. (4) Issued cost = current weighted-avg cost snapshot. (5) Transaction-wrapped. (6) Cost center mandatory.
+
+### 16.2 Inter-Store Transfer
+
+**Context.** Central store → bar store, main kitchen → banquet, etc. Two-step
+(dispatch / receive) to track in-transit and shrinkage.
+
+**Stories.** Transfer with dispatch then receiving confirmation; record receiving variance with reason; in-transit stock visible.
+
+**Endpoints.** GET/POST/PUT `/api/v1/stock-transfers`; POST `/:id/dispatch` (TRANSFER_OUT ledger at source), `/:id/receive` (TRANSFER_IN at destination, variance handling), `/:id/cancel`.
+
+**Rules.** Dispatch decrements source + creates IN_TRANSIT; receive increments destination; `variance_qty = sent − received` posts as `WASTAGE`/`ADJUSTMENT` with mandatory reason; batch identity carried across stores.
+
+### 16.3 Physical Stock Count / Reconciliation
+
+**Context.** Periodic full/cycle/spot counts; the control that catches theft and
+wastage. Blind count hides system qty to prevent bias.
+
+**Stories.**
+- As a **Store Manager**, I want to generate a count sheet (full / by location / by category) and enter physical quantities.
+- As an **F&B Manager**, I want a blind count so counters can't see expected qty.
+- As an **F&B Manager**, I want a variance report (value + %) and to approve adjustments before they post.
+- As **Finance**, I want shrinkage value by period for cost control.
+
+**Endpoints.** GET/POST `/api/v1/stock-counts`; POST `/:id/start`, `/:id/enter` (bulk counted qty, supports barcode), `/:id/submit`, `/:id/review`, `/:id/approve`, `/:id/post` (posts `COUNT_ADJUSTMENT` ledger, adjusts batches), `/:id/recount` (flag lines); GET `/:id/variance-report`, `/:id/count-sheet?format=pdf`.
+
+**Rules.** (1) `system_qty` frozen at start. (2) Variance > config threshold → mandatory reason + may force recount. (3) Posting requires approval; adjustments are append-only ledger writes (no silent edits). (4) Counts can be category/location scoped; cycle-count schedule configurable. (5) Locks affected items from issuance while `IN_PROGRESS` (configurable).
+
+### 16.4 Wastage / Spoilage
+
+**Context.** Expired/spoiled/damaged/breakage write-offs with reason, photo
+evidence, approval, and cost reporting — major hotel cost-leakage control.
+
+**Stories.** Record wastage with reason + photo; approval before stock write-off; wastage analysis by reason/outlet/period; auto-suggest expired batches from expiry module.
+
+**Endpoints.** GET/POST/PUT `/api/v1/wastage`; POST `/:id/submit`, `/:id/approve`, `/:id/reject`, `/:id/post` (WASTAGE ledger OUT, batch decrement); GET `/:id`, `/reports/summary?groupBy=reason|outlet|period`.
+
+**Rules.** Approval tier by wastage value (reuse approval engine, new `approval_document_type` value `WASTAGE`); posting decrements batch + ledger; photo optional but configurable as mandatory above a value threshold.
+
+**Shared UI.** Stock Ops hub with four sub-apps (Issuance, Transfer, Count, Wastage); all list+form+detail; barcode-enabled qty entry; mobile/tablet-optimized layouts (loading-dock and floor use).
+
+---
+
+## 17. Module 8 — Finance & Payments
+
+### 17.1 Vendor Invoice & 3-Way Match
+
+**Context.** The finance close. Invoice is matched against PO (price) and GRN
+(received qty). Mismatches beyond tolerance are held; matched invoices flow to
+payment scheduling per payment terms.
+
+**Stories.**
+- As **Finance**, I want to register a vendor invoice and link it to its GRN(s)/PO.
+- As **Finance**, I want automatic 3-way match (PO price ↔ GRN qty ↔ invoice) flagging variances beyond tolerance.
+- As **Finance**, I want to hold/dispute a mismatched invoice and resolve via debit note.
+- As a **GM**, I want high-value invoice approval before payment.
+
+**Endpoints.** GET/POST/PUT `/api/v1/invoices`; POST `/:id/link-grn`, `/:id/run-match`, `/:id/verify`, `/:id/approve`, `/:id/dispute`, `/:id/hold`; GET `/:id/match-report`, `/aging`.
+
+**Match logic.** For each invoice line: find matched GRN qty (via po_item/grn links); `qty_variance = invoiced − received`; `price_variance = invoice_price − po_price`; tolerances from `system_settings` (default ±2% price, 0 qty). Set `line_match_status` and roll up to header `match_status`. MATCHED → eligible for payment; variance → `MISMATCH_HOLD`.
+
+### 17.2 Payments & Aging
+
+**Stories.** Schedule payment by due date; batch-pay multiple invoices to one vendor; allocate one payment across invoices/debit notes; payables aging (0–30/31–60/61–90/90+); payment approval tier.
+
+**Endpoints.** GET/POST `/api/v1/payments`; POST `/:id/approve`, `/:id/process`, `/:id/cancel`, `/:id/allocate`; GET `/aging`, `/due-soon`, `/vendor/:vendorId/ledger`.
+
+**Rules.** Total allocations ≤ payment amount; invoice `status` transitions PARTIALLY_PAID/PAID by cumulative allocation; debit notes net against payable; payment approval reuses approval engine (`PAYMENT` doc type); `paymentDueJob` raises PAYMENT_DUE notifications.
+
+### 17.3 Debit Notes / Returns to Vendor
+
+**Context.** Defect found after acceptance, short supply, overcharge → formal
+debit against vendor, settled by deduction from next payment or vendor credit.
+
+**Stories.** Raise debit note against GRN/invoice with reason; debit note reduces payable; track settlement; feeds vendor quality score.
+
+**Endpoints.** GET/POST/PUT `/api/v1/debit-notes`; POST `/:id/issue`, `/:id/acknowledge`, `/:id/settle`, `/:id/cancel`.
+
+**Rules.** Post-receipt return decrements stock (`RETURN_TO_VENDOR` ledger + batch); debit note links to payment_allocation for settlement; rejected/returned qty updates `vendor_performance_records` (lowers quality score, feeds Module 6 ranking).
+
+**UI.** Finance hub: Invoice list (match-status badges), Match workbench (PO|GRN|Invoice 3-pane diff), Payment scheduler + aging dashboard, Debit note manager. Finance role finally has a complete workspace.
+
+---
+
+## 18. Module 9 — Contracts & Standing Orders
+
+### 18.1 Rate Contracts
+
+**Context.** Annual/seasonal fixed-price agreements (vegetables, dairy, grocery).
+Contract price overrides spot RFQ; CS shows "Contract" vendors with locked price.
+
+**Stories.** Create rate contract with item price list + validity; PO auto-uses contract price when active (skips RFQ); alert before contract expiry; contract vs market price variance report.
+
+**Endpoints.** GET/POST/PUT `/api/v1/rate-contracts`; POST `/:id/activate`, `/:id/terminate`, `/:id/renew`; GET `/active-for-item/:itemId`, `/:id/price-variance`.
+
+**Rules.** Only one ACTIVE contract per vendor-item-period; contract price feeds PO directly; `contractExpiryJob` alerts `renewal_notice_days` before end; expiry auto-sets EXPIRED unless `auto_renew`.
+
+### 18.2 Standing Orders (recurring auto-PO)
+
+**Context.** Daily milk/bread/produce — RFQ per delivery is unusable. Standing
+order auto-generates POs on a schedule from a contract or last price.
+
+**Stories.** Define standing order (vendor, items, frequency, qty); system auto-generates PO on schedule; auto-approve below threshold; pause/resume (e.g., low-occupancy periods); skip a run with reason.
+
+**Endpoints.** GET/POST/PUT `/api/v1/standing-orders`; POST `/:id/pause`, `/:id/resume`, `/:id/end`, `/:id/skip-next`, `/:id/generate-now`; GET `/:id/runs`.
+
+**Rules.** `standingOrderJob` (daily cron) generates POs where `next_run_date <= today` per frequency/`custom_days`; price from linked rate contract else last purchase price; `auto_approve=true` skips approval if value < tier-1 threshold; each run logged in `standing_order_runs` (idempotent — no double-generation).
+
+**UI.** Contracts hub: rate-contract list/form with item price grid + expiry badges; standing-order calendar view (upcoming runs), run history, pause/skip controls.
+
+---
+
+## 19. Module 10 — Batch, Expiry & FEFO Management
+
+**Context.** Food safety + cost. Perishable stock tracked per batch with expiry;
+issuance/transfer consume FEFO; near-expiry alerts drive action before write-off.
+
+**Stories.**
+- As a **Store Manager**, I want stock tracked by batch with expiry so I know exactly what expires when.
+- As a **Store Manager**, I want FEFO auto-applied on issuance so nearest-expiry stock goes first.
+- As an **F&B Manager**, I want a near-expiry dashboard with value-at-risk so I can act (use-first menus, transfers, returns) before loss.
+- As a **Store Manager**, I want batch traceability (which GRN → which issuance) for recalls/food-safety audits.
+
+**Endpoints.** GET `/api/v1/batches?item_id&location&status`; GET `/batches/:id/trace` (GRN→batch→issuances chain); GET `/api/v1/expiry-alerts?level`; PATCH `/expiry-alerts/:id/action`; GET `/reports/near-expiry`, `/reports/expired-value`.
+
+**Rules.** Batches created on GRN post when `items.track_batches`; `available_qty` decremented by issuance/transfer/wastage; `expiryAlertJob` (daily) raises NEAR_EXPIRY (`<= near_expiry_days`), CRITICAL (`<= ceil(near_expiry_days/3)`), EXPIRED (`< today`); expired batches auto-`QUARANTINED` and proposed to Wastage module; FEFO is the mandatory picking order everywhere stock leaves.
+
+**UI.** Expiry dashboard (heatmap by days-to-expiry, value-at-risk KPIs, drill to batch); batch trace timeline; one-click "send to wastage" / "create transfer" from alert.
+
+---
+
+## 20. Module 11 — Recipe / BOM & Costing
+
+**Context.** Bridges inventory to the menu. Recipe = BOM of items (+ nested
+sub-recipes) with wastage %. Recipe costing rolls live weighted-avg item cost into
+plate cost and food-cost % — core F&B management metric. (Optional POS-driven
+depletion is a documented future hook, not in initial build.)
+
+**Stories.**
+- As an **F&B Manager**, I want to define recipes with ingredient quantities and wastage % so plate cost is known.
+- As an **F&B Manager**, I want recipe cost auto-recomputed when item costs change so menu pricing stays accurate.
+- As an **F&B Manager**, I want food-cost % vs selling price per dish to spot margin erosion.
+- As a **chef**, I want nested sub-recipes (sauces, stocks) reused across dishes.
+
+**Endpoints.** GET/POST/PUT `/api/v1/recipes`; GET `/:id/costing` (live roll-up), POST `/:id/recost`; GET `/reports/food-cost`, `/reports/margin-alert`.
+
+**Rules.** Cost = Σ(ingredient qty × current weighted-avg cost × (1 + wastage%)) + nested sub-recipe cost (recursive, cycle-protected); `food_cost_percent = total_cost / selling_price × 100`; recompute on demand + nightly; margin-alert when food-cost% exceeds configurable target.
+
+**UI.** Recipe builder (ingredient grid, sub-recipe picker, live cost preview), costing report, margin-alert list.
+
+---
+
+## 21. Modules 12–14 — Reports, Configuration, Audit & Notifications
+
+### 21.1 Module 12 — Reports & Analytics
+
+**Report catalog** (all filterable by date/outlet/category/vendor; export CSV/Excel/PDF):
+
+| Report | Purpose |
+|---|---|
+| F&B Cost Report | Opening + purchases − closing = consumption; cost % vs revenue |
+| Stock Valuation | On-hand value (weighted avg) by location/category, as-of date |
+| Consumption / Issuance | Issued qty/value by outlet & cost center |
+| Variance Report | Stock-count system vs physical, shrinkage value |
+| Wastage Analysis | By reason/outlet/period, % of consumption |
+| Slow / Non-Moving Stock | No movement in N days, capital locked |
+| ABC Analysis | Items ranked by consumption value (A/B/C), writes `items.abc_class` |
+| Reorder Report | At/below reorder point, suggested order qty |
+| Near-Expiry / Expired | Value at risk by days bucket |
+| Purchase Register | All POs by vendor/period |
+| GRN Register | All receipts, accepted vs rejected |
+| Vendor Spend Analysis | Spend by vendor/category, vs contract |
+| Payables Aging | Outstanding by ageing bucket |
+| Price Variance | Actual vs contract / vs market |
+| Recipe Food-Cost | Plate cost & margin per dish |
+
+**Endpoints.** `GET /api/v1/reports/:reportKey?...filters&format=`; `GET /api/v1/reports/catalog`; scheduled-report subscription (email) via `system_settings`.
+
+**UI.** Report Center (catalog cards, saved filters, scheduled email subscriptions); each report has table + chart + export.
+
+### 21.2 Module 13 — System Configuration
+
+**Stories.** Admin manages UOM master, tax master, document number series, financial year, hotel profile, tolerances/thresholds (price-alert %, match tolerance, count variance, food-cost target), without code changes.
+
+**Endpoints.** CRUD `/api/v1/settings/uom`, `/settings/tax`, `/settings/number-series`, `/settings/financial-years`, `/settings/hotel-profile`, `/settings/system` (key/value); POST `/settings/financial-years/:id/close` (period close: lock transactions, snapshot closing stock as next period opening).
+
+**Rules.** One current financial year; closed period blocks back-dated postings; number-series changes don't affect issued numbers; UOM/tax changes are effective-dated.
+
+### 21.3 Module 14 — Audit Log & Notifications
+
+**Audit.** Global middleware writes `audit_logs` (before/after JSON) for every
+create/update/delete/status/approve/reject/post/login/export on all entities —
+immutable, queryable by entity or actor. **Stories:** as Admin/GM, trace any
+change for compliance/forensics. **Endpoint:** `GET /api/v1/audit-logs?entity_type&entity_id&actor&action&from&to`. **UI:** filterable audit viewer with before/after diff.
+
+**Notifications.** Unified framework: `notifications` + per-user
+`notification_preferences` (per type, channel IN_APP/EMAIL/BOTH). Producers:
+approvals, price/expiry/reorder/payment-due/contract-expiry/stock-count-due, GRN
+posted. **Endpoints:** `GET /api/v1/notifications`, `PATCH /:id/read`, `POST /read-all`, GET/PUT `/notification-preferences`. **UI:** topbar bell with unread count, dropdown, preferences screen.
+
+---
+
+## 22. Cross-Cutting Enhancements & Consolidated Permission Matrix
+
+**22.1 Approval Delegation.** `approval_delegations` lets an approver delegate to a
+same-role user for a date range; the approval engine resolves the active delegate
+when routing/notifying so leave never stalls procurement. Endpoints: GET/POST/DELETE
+`/api/v1/delegations`. UI: "Delegate my approvals" self-service.
+
+**22.2 Bulk Import/Export.** Excel/CSV import with template download, dry-run
+validation (row-level errors), and commit, for: items, vendors, vendor-item map,
+rate-contract prices, opening stock. Endpoints: `GET /bulk-io/template/:entity`,
+`POST /bulk-io/:entity/validate`, `POST /bulk-io/:entity/commit`. Essential for
+go-live onboarding.
+
+**22.3 Role-Specific Dashboards.** Distinct home per role —
+*Store Manager:* reorder list, pending issuances, count due, near-expiry.
+*F&B Manager:* F&B cost %, wastage trend, approvals, top variances.
+*Finance:* payables aging, invoices to match, payments due, debit notes.
+*GM:* spend vs budget, high-value approvals, vendor ranking, KPI tiles.
+*Admin:* system health, audit highlights, master-data counts.
+Endpoint: `GET /api/v1/dashboard` (payload varies by role).
+
+**22.4 PO Amendment / Revision.** Amend a sent PO (qty/price/date) → new revision
+(`parent_po_id`, `revision_no++`, prior `SUPERSEDED`); re-triggers approval if value
+rises beyond original tier; full revision history on PO detail.
+
+**22.5 Barcode / QR.** `items.barcode` indexed; GRN, stock count, issuance, and
+transfer screens accept scanner input (HID keyboard-wedge + camera scan on mobile);
+label-print for shelf/bin.
+
+**22.6 Mobile/Tablet Receiving.** Responsive, touch-first GRN, stock-count, and
+issuance screens for loading-dock/floor tablet use.
+
+**22.7 Global Search.** Single search bar across items, vendors, PR/RFQ/PO/GRN/
+invoice by number or name — first-class, in topbar (not a Phase 7 afterthought).
+
+**22.8 Landed-Cost Comparison.** CS compares `landed_unit_price` (net + freight +
+non-recoverable tax), not just unit price, so the cheapest *true* cost wins.
+
+**22.9 Notification-Driven UX.** All time-critical events (reorder, expiry, approval,
+payment due, contract expiry, count due) push to the in-app bell + optional email
+per user preference.
+
+### Consolidated Permission Matrix — new capabilities
+
+| Permission | ADMIN | STORE_MGR | FB_MGR | FINANCE | GM |
+|---|:--:|:--:|:--:|:--:|:--:|
+| Stock requisition (create) | Y | Y | Y | N | N |
+| Stock issue (post) | Y | Y | N | N | N |
+| Inter-store transfer | Y | Y | N | N | N |
+| Stock count create/enter | Y | Y | N | N | N |
+| Stock count approve/post | Y | N | Y | N | Y |
+| Wastage report | Y | Y | Y | N | N |
+| Wastage approve | Y | N | Y | N | Y |
+| Invoice register/verify/match | Y | N | N | Y | N |
+| Invoice approve (high value) | Y | N | N | N | Y |
+| Payment schedule/allocate | Y | N | N | Y | N |
+| Payment approve | Y | N | N | N | Y |
+| Debit note issue | Y | N | N | Y | N |
+| Rate contract create | Y | Y | Y | N | N |
+| Rate contract approve | Y | N | N | N | Y |
+| Standing order manage | Y | Y | Y | N | N |
+| Batch/expiry view & action | Y | Y | Y | Y | Y |
+| Recipe create/cost | Y | N | Y | N | N |
+| Reports view/export | Y | Y | Y | Y | Y |
+| System configuration | Y | N | N | N | N |
+| Financial period close | Y | N | N | Y | N |
+| Audit log view | Y | N | N | N | Y |
+| Bulk import/export | Y | Y | N | N | N |
+| Delegate own approvals | Y | Y | Y | Y | Y |
+| PO amendment | Y | Y | Y | N | N |
+
+---
+
+## 23. Consolidated Development Phase Plan (authoritative — supersedes §13)
+
+Same scale (1–13). Part I phases 1–7 unchanged; Part II adds phases 8–13.
+
+| Phase | Scope | Points | Duration |
+|---|---|---|---|
+| 1 | Foundation (scaffold, schema, JWT, AppShell) | 38 | 2 wk |
+| 2 | Master Data (items, vendors, categories) | 84 | 2 wk |
+| 3 | Procurement Core (PR→RFQ→CS→PO→GRN) | 136 | 4 wk |
+| 4 | Approval Workflow + **delegation** | 64 | 2 wk |
+| 5 | Price History & Alerts | 44 | 2 wk |
+| 6 | Vendor Ranking Engine | 57 | 2 wk |
+| **7** | **Stock Operations** (issuance, transfer, count, wastage) | **128** | **4 wk** |
+| **8** | **Batch/Expiry/FEFO** + integrate into all OUT flows | **52** | **2 wk** |
+| **9** | **Finance & Payments** (invoice match, payments, debit notes) | **120** | **3.5 wk** |
+| **10** | **Contracts & Standing Orders** + PO source/amendment | **78** | **2.5 wk** |
+| **11** | **Recipe / BOM & Costing** | **44** | **1.5 wk** |
+| **12** | **System Config, Audit, Notifications, Delegation, Bulk I/O** | **86** | **2.5 wk** |
+| **13** | **Reports, Role Dashboards, Barcode, Mobile, Global Search, Polish** | **128** | **4 wk** |
+| **Total** | | **1,159** | **~38 wk (~9 months)** |
+
+Build order rationale: **7 → 8** before **9** (issuance/batch must exist before
+3-way match and stock-affecting returns); **10** after procurement+finance (contracts
+feed PO, standing orders feed payment); **11** after stock ops (recipe cost needs
+live weighted-avg); **12–13** harden and make it easy to use. Assumes 1 BE + 1 FE
+dev at ~30–35 pts/dev/sprint; a 3–4 dev team compresses this to ~5 months.
+
+### Recommended MVP cut (if time-boxed)
+Phases 1–9 (procurement + stock ops + batch/expiry + finance) = a **complete,
+auditable inventory system**: ~723 pts (~24 wk). Contracts, recipe, advanced
+reports/UX (10–13) follow as fast-follow releases.
+
+### Additional critical implementation files (Part II)
+- `/backend/src/modules/stock-issuance/stock-issuance.service.ts` — FEFO picking + OUT ledger transaction.
+- `/backend/src/modules/invoices/invoices.service.ts` — 3-way match engine.
+- `/backend/src/modules/batch-expiry/fefo.ts` — shared FEFO resolver used by issuance/transfer/wastage.
+- `/backend/src/jobs/standingOrderJob.ts` — idempotent recurring-PO generator.
+- `/backend/src/middleware/audit.ts` — global before/after audit capture.
+- `/backend/src/modules/stock-count/stock-count.service.ts` — variance reconciliation + adjustment posting.
