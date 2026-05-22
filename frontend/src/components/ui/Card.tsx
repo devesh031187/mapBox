@@ -5,12 +5,14 @@ export interface CardProps
   title?: ReactNode;
   subtitle?: ReactNode;
   footer?: ReactNode;
+  noPadding?: boolean;
 }
 
 export function Card({
   title,
   subtitle,
   footer,
+  noPadding = false,
   className = '',
   children,
   ...rest
@@ -32,7 +34,7 @@ export function Card({
           )}
         </div>
       )}
-      <div className="px-5 py-4">{children}</div>
+      <div className={noPadding ? '' : 'px-5 py-4'}>{children}</div>
       {footer && (
         <div className="border-t border-slate-100 px-5 py-3">
           {footer}

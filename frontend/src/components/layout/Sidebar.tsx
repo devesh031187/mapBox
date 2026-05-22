@@ -36,11 +36,34 @@ export function Sidebar() {
             {item.label}
           </NavLink>
         ))}
+
+        {/* Master Data sub-links always visible for stock / admin roles */}
+        <div className="mt-4 pt-4 border-t border-slate-700">
+          <p className="px-3 mb-1 text-[10px] uppercase tracking-widest text-slate-500">Master Data</p>
+          {[
+            { path: '/categories', label: 'Categories' },
+            { path: '/storage-locations', label: 'Storage Locations' },
+          ].map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) =>
+                `block rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-brand-600 text-white'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                }`
+              }
+            >
+              {item.label}
+            </NavLink>
+          ))}
+        </div>
       </nav>
 
       <div className="border-t border-slate-800 px-5 py-3">
         <p className="text-[10px] text-slate-500">
-          v0.1.0 &middot; Phase 1
+          v0.2.0 &middot; Phase 2
         </p>
       </div>
     </aside>
